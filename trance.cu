@@ -503,7 +503,8 @@ typedef struct { char magic[8]; uint32_t version,dtype; FileHeader f; } DiskHead
 static int tensors(Model*m,Tensor***out){int n=6+m->nt,i=0;Tensor**a=(Tensor**)xmalloc((size_t)n*sizeof(*a));a[i++]=&m->tok;a[i++]=&m->pos;a[i++]=&m->lnfg;a[i++]=&m->lnfb;a[i++]=&m->headw;a[i++]=&m->headb;for(;i<n;i++)a[i]=&m->p[i-6];*out=a;return n;}
 static void save_file(const char*path,Model*m,const Config*c,uint64_t step,int opt){
     DiskHeader h={0};Tensor**a;int n,i;FILE*f=fopen(path,"wb");CHECK(f,"cannot write %s: %s",path,strerror(errno));
-    memcpy(h.magic,MAGIC,7);h.version=VERSION;h.dtype=1;h.f=(FileHeader){c->vocab,c->ctx,c->d,c->layers,c->heads,c->ff,step,(uint32_t)opt};
+    memcpy(h.magic,MAGIC,7);h.version=VERSION;h.dtype=1;
+    h.f.vocab=c->vocab;h.f.ctx=c->ctx;h.f.d=c->d;h.f.layers=c->layers;h.f.heads=c->heads;h.f.ff=c->ff;h.f.step=step;h.f.has_optimizer=(uint32_t)opt;
     CHECK(fwrite(&h,sizeof h,1,f)==1,"write header failed");
     n=tensors(m,&a);
     for(i=0;i<n;i++){
