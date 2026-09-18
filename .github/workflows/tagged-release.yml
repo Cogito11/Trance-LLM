@@ -22,7 +22,11 @@ jobs:
             asset_name: trance-linux-x86_64
             cuda_sub_packages: '["nvcc","cudart"]'
             cuda_non_cuda_sub_packages: '["libcublas","libcublas-dev"]'
-          - os: windows-latest
+          # Pinned to windows-2022 (not windows-latest): as of mid-2026,
+          # windows-latest ships Visual Studio 2026, and nvcc's host-compiler
+          # check only accepts up through VS 2022. windows-2022 stays on the
+          # older, supported toolset regardless of where windows-latest moves.
+          - os: windows-2022
             output_name: trance.exe
             asset_name: trance-windows-x86_64.exe
             cuda_sub_packages: '["nvcc","cudart","cublas","cublas_dev"]'
