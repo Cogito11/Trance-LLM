@@ -41,10 +41,15 @@ jobs:
       # Windows. The 'local' method downloads a ~4GB monolithic .run/.exe
       # installer that tries to talk to a tty and fails under sudo on
       # hosted runners, so avoid it here.
+      # Pinned to 12.6.0 rather than trusting the action's current default
+      # (13.2.0): CUDA 13.x has a known broken header layout on Windows that
+      # leaves out crt/host_config.h, which nvcc needs. 12.6.0 is a
+      # well-established release without that problem.
       - name: Install CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.36
         id: cuda-toolkit
         with:
+          cuda: '12.6.0'
           method: network
           sub-packages: ${{ matrix.cuda_sub_packages }}
           non-cuda-sub-packages: ${{ matrix.cuda_non_cuda_sub_packages }}
