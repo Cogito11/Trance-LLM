@@ -1,0 +1,94 @@
+name: Rolling Release
+
+# Builds trance.cu for Linux and Windows on every push to main, then
+# republishes both binaries as a single, continuously-updated pre-release
+# tagged "rolling". This gives anyone tracking main ready-to-run binaries
+# without waiting for a version tag.
+on:
+  push:
+    branches: [main]
+
+# If two pushes land close together, only let the newer build publish.
+concurrency:
+  group: rolling-release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            output_name: trance
+            asset_name: trance-linux-x86_64
+          - os: windows-latest
+            output_name: trance.exe
+            asset_name: trance-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Activates cl.exe and the MSVC headers/libs nvcc needs as its host
+      # compiler on Windows. No-op on Linux.
+      - name: Set up MSVC dev environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Installs the full CUDA toolkit (nvcc + cuBLAS headers/libs) for
+      # whichever OS this matrix leg is running on. This only needs to
+      # compile and link the binary, not run it, so it works fine on
+      # GitHub's standard runners even though they have no GPU.
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        id: cuda-toolkit
+
+      - name: Build
+        shell: bash
+        run: nvcc -O3 -o ${{ matrix.output_name }} trance.cu -lcublas
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp ${{ matrix.output_name }} dist/${{ matrix.asset_name }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish rolling pre-release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: rolling
+          name: Rolling build
+          body: |
+            Automatic build of the latest commit on `main`.
+
+            Commit: ${{ github.sha }}
+
+            Includes Linux and Windows binaries. This pre-release is overwritten
+            on every push to `main` and is not guaranteed to be stable. For
+            versioned builds, see the tagged releases in this repository.
+          prerelease: true
+          allowUpdates: true
+          removeArtifacts: true
+          replacesArtifacts: true
+          artifacts: dist/*
+          token: ${{ secrets.GITHUB_TOKEN }}

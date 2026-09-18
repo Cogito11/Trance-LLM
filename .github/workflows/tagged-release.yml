@@ -1,0 +1,81 @@
+name: Tagged Release
+
+# Builds trance.cu for Linux and Windows and publishes a proper GitHub
+# Release, with both binaries attached, whenever a version tag
+# (v12, v0.14, v1.2.3, ...) is pushed.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            output_name: trance
+            asset_name: trance-linux-x86_64
+          - os: windows-latest
+            output_name: trance.exe
+            asset_name: trance-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC dev environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.36
+        id: cuda-toolkit
+
+      - name: Build
+        shell: bash
+        run: nvcc -O3 -o ${{ matrix.output_name }} trance.cu -lcublas
+
+      # Informational only, runs once (Linux leg) so it doesn't need a
+      # Windows-compatible grep: flags it if TRANCE_VERSION wasn't bumped
+      # to match the tag before tagging, without failing the build over it.
+      - name: Compare TRANCE_VERSION against the pushed tag
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          built_version=$(grep -oP '(?<=#define TRANCE_VERSION ")[^"]+' trance.cu || echo "not found")
+          echo "trance.cu TRANCE_VERSION: $built_version"
+          echo "git tag:                  ${GITHUB_REF_NAME}"
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp ${{ matrix.output_name }} dist/${{ matrix.asset_name }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Trance ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true

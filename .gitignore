@@ -1,0 +1,41 @@
+# Compiled binary (built with: nvcc -O3 -o trance trance.cu -lcublas)
+trance
+*.exe
+
+# Object files / misc build artifacts
+*.o
+*.obj
+*.out
+*.ptx
+*.cubin
+*.fatbin
+
+# nvcc/CUDA scratch files
+*.i
+*.ii
+*.gpu
+*.stub.c
+*.dlink.*
+
+# Logs
+*.log
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Python (dataset generation scripts under data/*/generate_dataset*.py)
+__pycache__/
+*.pyc
+*.pyo
+
+models/
+data/
+configs/
