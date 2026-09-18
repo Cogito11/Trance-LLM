@@ -25,9 +25,13 @@ jobs:
           - os: ubuntu-latest
             output_name: trance
             asset_name: trance-linux-x86_64
+            cuda_sub_packages: '["nvcc","cudart"]'
+            cuda_non_cuda_sub_packages: '["libcublas","libcublas-dev"]'
           - os: windows-latest
             output_name: trance.exe
             asset_name: trance-windows-x86_64.exe
+            cuda_sub_packages: '["nvcc","cudart","cublas","cublas_dev"]'
+            cuda_non_cuda_sub_packages: '[]'
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -39,13 +43,18 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # Installs the full CUDA toolkit (nvcc + cuBLAS headers/libs) for
-      # whichever OS this matrix leg is running on. This only needs to
-      # compile and link the binary, not run it, so it works fine on
-      # GitHub's standard runners even though they have no GPU.
+      # Installs only the pieces we actually need (nvcc + cuBLAS) via the
+      # 'network' method, which uses apt on Linux / a small web installer on
+      # Windows. The 'local' method downloads a ~4GB monolithic .run/.exe
+      # installer that tries to talk to a tty and fails under sudo on
+      # hosted runners, so avoid it here.
       - name: Install CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.36
         id: cuda-toolkit
+        with:
+          method: network
+          sub-packages: ${{ matrix.cuda_sub_packages }}
+          non-cuda-sub-packages: ${{ matrix.cuda_non_cuda_sub_packages }}
 
       - name: Build
         shell: bash
