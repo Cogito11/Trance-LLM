@@ -23,6 +23,7 @@ jobs:
             platform: linux-x86_64
             cuda_sub_packages: '["nvcc","cudart"]'
             cuda_non_cuda_sub_packages: '["libcublas","libcublas-dev"]'
+            extra_flags: ''
           # Pinned to windows-2022 (not windows-latest): as of mid-2026,
           # windows-latest ships Visual Studio 2026, and nvcc's host-compiler
           # check only accepts up through VS 2022. windows-2022 stays on the
@@ -32,6 +33,10 @@ jobs:
             platform: windows-x86_64
             cuda_sub_packages: '["nvcc","cudart","cublas","cublas_dev"]'
             cuda_non_cuda_sub_packages: '[]'
+            # Statically link the MSVC runtime so users don't need the
+            # Visual C++ Redistributable. Written -MT (not /MT) because
+            # Git Bash rewrites a leading "/MT" into a filesystem path.
+            extra_flags: '-Xcompiler -MT'
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -61,7 +66,10 @@ jobs:
 
       - name: Build
         shell: bash
-        run: nvcc -O3 -o ${{ matrix.output_name }} trance.cu -lcublas
+        # -arch=all-major embeds code for every major GPU generation (plus
+        # PTX for newer ones) so the binary runs on GPUs other than the
+        # one it was built for.
+        run: nvcc -O3 -arch=all-major ${{ matrix.extra_flags }} -o ${{ matrix.output_name }} trance.cu -lcublas
 
       # Informational only, runs once (Linux leg) so it doesn't need a
       # Windows-compatible grep: flags it if TRANCE_VERSION wasn't bumped
@@ -87,6 +95,23 @@ jobs:
           pkg="trance-${GITHUB_REF_NAME}-${{ matrix.platform }}"
           mkdir -p "$pkg/data" "$pkg/models"
           cp "${{ matrix.output_name }}" "$pkg/"
+          # Windows only: the exe links cuBLAS dynamically, so end users
+          # without the CUDA Toolkit would get "cublas64_12.dll was not
+          # found". Copy the two runtime DLLs (cuBLAS loads cublasLt too)
+          # next to the exe; Windows checks the exe's folder first. `find`
+          # is used instead of a hard-coded path because the toolkit's bin
+          # layout differs between CUDA releases.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cuda_dir=$(cygpath -u "$CUDA_PATH")
+            for dll in cublas64_12.dll cublasLt64_12.dll; do
+              src=$(find "$cuda_dir" -name "$dll" | head -n 1)
+              if [ -z "$src" ]; then
+                echo "::error::$dll not found under $cuda_dir"
+                exit 1
+              fi
+              cp "$src" "$pkg/"
+            done
+          fi
           cp -r configs "$pkg/configs"
           cp README.md LICENSE "$pkg/" 2>/dev/null || true
           mkdir -p dist
