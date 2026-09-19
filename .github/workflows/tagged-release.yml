@@ -1,8 +1,9 @@
 name: Tagged Release
 
 # Builds trance.cu for Linux and Windows and publishes a proper GitHub
-# Release, with both binaries attached, whenever a version tag
-# (v12, v0.14, v1.2.3, ...) is pushed.
+# Release, with both builds attached as zips, whenever a version tag
+# (v12, v0.14, v1.2.3, ...) is pushed. Each zip contains the program, the
+# example configs, and empty data/ and models/ folders.
 on:
   push:
     tags:
@@ -19,7 +20,7 @@ jobs:
         include:
           - os: ubuntu-latest
             output_name: trance
-            asset_name: trance-linux-x86_64
+            platform: linux-x86_64
             cuda_sub_packages: '["nvcc","cudart"]'
             cuda_non_cuda_sub_packages: '["libcublas","libcublas-dev"]'
           # Pinned to windows-2022 (not windows-latest): as of mid-2026,
@@ -28,7 +29,7 @@ jobs:
           # older, supported toolset regardless of where windows-latest moves.
           - os: windows-2022
             output_name: trance.exe
-            asset_name: trance-windows-x86_64.exe
+            platform: windows-x86_64
             cuda_sub_packages: '["nvcc","cudart","cublas","cublas_dev"]'
             cuda_non_cuda_sub_packages: '[]'
     runs-on: ${{ matrix.os }}
@@ -73,17 +74,30 @@ jobs:
           echo "trance.cu TRANCE_VERSION: $built_version"
           echo "git tag:                  ${GITHUB_REF_NAME}"
 
-      - name: Stage release asset
+      # Lays out the folder users will get, then zips it. The empty data/
+      # and models/ folders are created here because git can't track empty
+      # directories. Python's zipfile module is used because it exists on
+      # both runners, keeps empty directories, and records the Linux
+      # executable bit inside the zip (upload-artifact would otherwise
+      # strip file permissions). The version is in the name so downloads
+      # from different releases don't collide in a Downloads folder.
+      - name: Package release zip
         shell: bash
         run: |
+          pkg="trance-${GITHUB_REF_NAME}-${{ matrix.platform }}"
+          mkdir -p "$pkg/data" "$pkg/models"
+          cp "${{ matrix.output_name }}" "$pkg/"
+          cp -r configs "$pkg/configs"
+          cp README.md LICENSE "$pkg/" 2>/dev/null || true
           mkdir -p dist
-          cp ${{ matrix.output_name }} dist/${{ matrix.asset_name }}
+          PY=$(command -v python || command -v python3)
+          "$PY" -m zipfile -c "dist/${pkg}.zip" "$pkg"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: dist/${{ matrix.asset_name }}
+          name: trance-${{ matrix.platform }}
+          path: dist/trance-${{ github.ref_name }}-${{ matrix.platform }}.zip
 
   publish:
     needs: build

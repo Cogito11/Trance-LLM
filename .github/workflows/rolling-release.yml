@@ -1,8 +1,10 @@
 name: Rolling Release
 
 # Builds trance.cu for Linux and Windows on every push to main, then
-# republishes both binaries as a single, continuously-updated pre-release
-# tagged "rolling". This gives anyone tracking main ready-to-run binaries
+# republishes both builds as a single, continuously-updated pre-release
+# tagged "rolling". Each build is a zip containing the program, the example
+# configs, and empty data/ and models/ folders, so users can extract it and
+# run right away. This gives anyone tracking main ready-to-run builds
 # without waiting for a version tag.
 on:
   push:
@@ -33,7 +35,7 @@ jobs:
           # older, supported toolset regardless of where windows-latest moves.
           - os: windows-2022
             output_name: trance.exe
-            asset_name: trance-windows-x86_64.exe
+            asset_name: trance-windows-x86_64
             cuda_sub_packages: '["nvcc","cudart","cublas","cublas_dev"]'
             cuda_non_cuda_sub_packages: '[]'
     runs-on: ${{ matrix.os }}
@@ -69,17 +71,29 @@ jobs:
         shell: bash
         run: nvcc -O3 -o ${{ matrix.output_name }} trance.cu -lcublas
 
-      - name: Stage release asset
+      # Lays out the folder users will get, then zips it. The empty data/
+      # and models/ folders are created here because git can't track empty
+      # directories. Python's zipfile module is used because it exists on
+      # both runners, keeps empty directories, and records the Linux
+      # executable bit inside the zip (upload-artifact would otherwise
+      # strip file permissions).
+      - name: Package release zip
         shell: bash
         run: |
+          pkg="${{ matrix.asset_name }}"
+          mkdir -p "$pkg/data" "$pkg/models"
+          cp "${{ matrix.output_name }}" "$pkg/"
+          cp -r configs "$pkg/configs"
+          cp README.md LICENSE "$pkg/" 2>/dev/null || true
           mkdir -p dist
-          cp ${{ matrix.output_name }} dist/${{ matrix.asset_name }}
+          PY=$(command -v python || command -v python3)
+          "$PY" -m zipfile -c "dist/${pkg}.zip" "$pkg"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: dist/${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}.zip
 
   publish:
     needs: build
@@ -101,9 +115,12 @@ jobs:
 
             Commit: ${{ github.sha }}
 
-            Includes Linux and Windows binaries. This pre-release is overwritten
-            on every push to `main` and is not guaranteed to be stable. For
-            versioned builds, see the tagged releases in this repository.
+            Includes Linux and Windows builds. Each zip contains the program,
+            the example `configs/`, and empty `data/` and `models/` folders.
+            Extract a model bundle into `models/` to use it. This pre-release
+            is overwritten on every push to `main` and is not guaranteed to be
+            stable. For versioned builds, see the tagged releases in this
+            repository.
           prerelease: true
           allowUpdates: true
           removeArtifacts: true
