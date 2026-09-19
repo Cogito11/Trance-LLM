@@ -20,5 +20,5 @@
   "train_data": "data/smoltalk/train.txt,data/ultrachat/train.txt,data/no_robots/train.txt,data/everyday_conversations/train.txt",
   "validation_data": "data/smoltalk/validation.txt,data/ultrachat/validation.txt,data/no_robots/validation.txt,data/everyday_conversations/validation.txt",
 
-  "output_model": "models/trance2_21m.bin"
+  "output_model": "models/trance1_21m.bin"
 }
