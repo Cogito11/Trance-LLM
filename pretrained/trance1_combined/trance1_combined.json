@@ -1,0 +1,26 @@
+{
+  "vocab_size": 1024,
+  "context_length": 512,
+
+  "embedding_dim": 384,
+  "layers": 8,
+  "attention_heads": 8,
+  "feed_forward_dim": 1536,
+
+  "batch_size": 16,
+
+  "training_steps": 30000,
+  "eval_interval": 250,
+  "checkpoint_interval": 2000,
+
+  "learning_rate": 0.0002,
+  "gradient_clip": 1.0,
+  "seed": 4004,
+
+  "resume_model": "models/trance1_smoltalk.bin.step74000.bin",
+
+  "train_data": "data/smoltalk/train.txt,data/ultrachat/train.txt",
+  "validation_data": "data/smoltalk/validation.txt",
+
+  "output_model": "models/trance1_combined.bin"
+}
