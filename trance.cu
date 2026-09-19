@@ -27,7 +27,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
-#define TRANCE_VERSION "Beta 16" /* user-facing release name: shown in the REPL banner,
+#define TRANCE_VERSION "Beta 18" /* user-facing release name: shown in the REPL banner,
                                    * usage text, and model summary. Bump this string
                                    * alone when cutting a new release; it is unrelated
                                    * to the on-disk format VERSION below. */
@@ -910,15 +910,43 @@ static void gpu_name(char*buf,size_t n);
 static void print_model_summary(const char*path,Model*m,const Config*c,uint64_t step){printf("Loaded model: %s\n  BPE vocabulary: %d | context: %d | embedding: %d | layers: %d | heads: %d\n  parameters: %zu | training step: %llu\n",path,c->vocab,c->ctx,c->d,c->layers,c->heads,parameter_count(m),(unsigned long long)step);}
 static char *trim(char*s){while(isspace((unsigned char)*s))s++;size_t n=strlen(s);while(n&&isspace((unsigned char)s[n-1]))s[--n]=0;return s;}
 static char *unquote(char*s){s=trim(s);size_t n=strlen(s);if(n>=2&&s[0]=='\"'&&s[n-1]=='\"'){s[n-1]=0;return s+1;}return s;}
-static void ask_model(Model*m,const Config*c,Cache*z,const Tokenizer*tok,const char*message,uint64_t*seed){char formatted[4600];CHECK(strlen(message)<4000,"message is too long");snprintf(formatted,sizeof formatted,"<user>\n%s\n\n<assistant>\n",message);fputs("assistant> ",stdout);generate(m,c,z,tok,formatted,64,.45f,12,.92f,(*seed)++,0);}
-static void chat_loop(Model*m,const Config*c,Cache*z,const Tokenizer*tok,uint64_t*seed){char line[4096];puts("Chat mode. Type a message; use /help for help or /exit to return to the main menu.");while(fputs("you> ",stdout),fflush(stdout),fgets(line,sizeof line,stdin)){char*p=trim(line);if(!strcmp(p,"/exit")||!strcmp(p,"/quit"))break;if(!strcmp(p,"/help")){puts("/exit  Return to the main menu\n/help  Show chat help");continue;}if(*p)ask_model(m,c,z,tok,p,seed);}}
+/* Shared safety-cap calculation for generation length: responses should
+ * normally end on their own via an EOT/role-boundary token (see
+ * generate()'s IS_SPECIAL check), so this exists only to bound the rare
+ * case that never happens. Leaves room below c->ctx for the prompt itself. */
+static int gen_safety_cap(const Config*c){int n=c->ctx-64; if(n>400)n=400; if(n<32)n=32; return n;}
+static void ask_model(Model*m,const Config*c,Cache*z,const Tokenizer*tok,const char*message,uint64_t*seed,int max_new){char formatted[4600];CHECK(strlen(message)<4000,"message is too long");snprintf(formatted,sizeof formatted,"<user>\n%s\n\n<assistant>\n",message);fputs("assistant> ",stdout);
+    /* temp .45/top-k 12 was conservative enough that the model would
+     * repeatedly lock onto its own most-confident token and loop
+     * ("memory memory memory..."), especially visible now that max_new
+     * is large enough to let a loop run instead of being cut off early.
+     * Higher temperature/top-k gives the sampler room to step away from
+     * a token it just emitted instead of reinforcing it. */
+    generate(m,c,z,tok,formatted,max_new,.8f,40,.95f,(*seed)++,0);}
+static void chat_loop(Model*m,const Config*c,Cache*z,const Tokenizer*tok,uint64_t*seed){
+    char line[4096]; int max_new=gen_safety_cap(c);
+    puts("Chat mode. Type a message; use /help for help or /exit to return to the main menu.");
+    while(fputs("you> ",stdout),fflush(stdout),fgets(line,sizeof line,stdin)){
+        char*p=trim(line);
+        if(!strcmp(p,"/exit")||!strcmp(p,"/quit"))break;
+        if(!strcmp(p,"/help")){printf("/exit          Return to the main menu\n/help          Show chat help\n/maxlen N      Set the safety cap on response length in tokens (currently %d) -- responses normally end on their own before this\n",max_new);continue;}
+        if(!strncmp(p,"/maxlen",7)){
+            const char*arg=p+7; while(*arg==' ')arg++;
+            int n=atoi(arg);
+            if(n>0&&n<=c->ctx) { max_new=n; printf("response length safety cap set to %d tokens\n",max_new); }
+            else printf("usage: /maxlen N  (N must be between 1 and %d, the model's context length)\n",c->ctx);
+            continue;
+        }
+        if(*p)ask_model(m,c,z,tok,p,seed,max_new);
+    }
+}
 static int console_load(const char*path,Model*m,Config*c,Tokenizer*t,Cache*z,uint64_t*step){FILE*f=fopen(path,"rb");if(!f)return 0;fclose(f);if(m->tok.w){cache_free(z);model_free(m);}load_for_cli(path,m,c,t,step);*z=cache_new(c);return 1;}
 static void console_help(void){puts("Main menu commands:\n  help                         Show this menu\n  status                       Show the loaded model\n  load [MODEL]                 Load a model (default: models/trance1-stem-3b.bin)\n  chat                         Enter chat mode; /exit returns here\n  prompt \"MESSAGE\"           Send one conversational message\n  generate \"PROMPT\"          Generate from raw text\n  evaluate [DATA]              Evaluate loaded model (default validation file)\n  inspect [MODEL]              Inspect a model file\n  train [CONFIG]               Train (default: configs/trance1.json)\n  test                         Run numerical and serialization tests\n  exit                         Leave Trance\n\nDirect CLI Access is available, ex: trance train --config configs/trance1.json.");}
 static void print_banner(void){
     char gpu[320]; gpu_name(gpu,sizeof gpu);
     printf("\n Trance LLM Interactive Console\n\n Version:   %s\n Using GPU: %s\n",TRANCE_VERSION,gpu);
 }
-static void terminal_repl(void){Config c={0};Model m={0};Tokenizer tok;Cache z={0};uint64_t step=0,seed=1;char path[MAX_PATH]="models/trance1-stem-3b.bin",line[4096];int loaded=console_load(path,&m,&c,&tok,&z,&step);print_banner();putchar('\n');if(loaded)print_model_summary(path,&m,&c,step);else puts("No default model is loaded. Train one with: train configs/trance1.json");putchar('\n');console_help();while(fputs("trance> ",stdout),fflush(stdout),fgets(line,sizeof line,stdin)){char *cmd=trim(line),*arg=cmd;while(*arg&&!isspace((unsigned char)*arg))arg++;if(*arg)*arg++=0;arg=unquote(arg);if(!strcmp(cmd,"exit")||!strcmp(cmd,"quit"))break;if(!strcmp(cmd,"help")){console_help();continue;}if(!strcmp(cmd,"status")){if(loaded)print_model_summary(path,&m,&c,step);else puts("No model loaded.");continue;}if(!strcmp(cmd,"load")){const char*target=*arg?arg:"models/trance1-stem-3b.bin";if(console_load(target,&m,&c,&tok,&z,&step)){strncpy(path,target,sizeof(path)-1);path[sizeof(path)-1]=0;loaded=1;print_model_summary(path,&m,&c,step);}else fprintf(stderr,"error: cannot open %s\n",target);continue;}if(!strcmp(cmd,"inspect")){inspect(*arg?arg:(loaded?path:"models/trance1-stem-3b.bin"));continue;}if(!strcmp(cmd,"test")){run_tests();continue;}if(!strcmp(cmd,"train")){const char*config=*arg?arg:"configs/trance1.json";Config trained;config_load(config,&trained);train(config);if(console_load(trained.output,&m,&c,&tok,&z,&step)){strncpy(path,trained.output,sizeof(path)-1);path[sizeof(path)-1]=0;loaded=1;print_model_summary(path,&m,&c,step);}continue;}if(!loaded){puts("No model loaded. Use train, load, inspect, help, or exit.");continue;}if(!strcmp(cmd,"chat")){chat_loop(&m,&c,&z,&tok,&seed);continue;}if(!strcmp(cmd,"prompt")){if(!*arg)puts("usage: prompt \"your message\"");else ask_model(&m,&c,&z,&tok,arg,&seed);continue;}if(!strcmp(cmd,"generate")){if(!*arg)puts("usage: generate \"raw prompt\"");else generate(&m,&c,&z,&tok,arg,64,.7f,20,.92f,seed++,1);continue;}if(!strcmp(cmd,"evaluate")){Data raw,d;const char*data=*arg?arg:"data/trance1/validation.txt";raw=raw_file_list(data);d=bpe_encode_raw(&tok,&raw);printf("loss %.4f\n",evaluate(&m,&c,&z,&d));free(raw.x);free(raw.mask);free(d.x);free(d.mask);continue;}puts("Unknown command. Type help.");}if(loaded){cache_free(&z);model_free(&m);}}
+static void terminal_repl(void){Config c={0};Model m={0};Tokenizer tok;Cache z={0};uint64_t step=0,seed=1;char path[MAX_PATH]="models/trance1-stem-3b.bin",line[4096];int loaded=console_load(path,&m,&c,&tok,&z,&step);print_banner();putchar('\n');if(loaded)print_model_summary(path,&m,&c,step);else puts("No default model is loaded. Train one with: train configs/trance1.json");putchar('\n');console_help();while(fputs("trance> ",stdout),fflush(stdout),fgets(line,sizeof line,stdin)){char *cmd=trim(line),*arg=cmd;while(*arg&&!isspace((unsigned char)*arg))arg++;if(*arg)*arg++=0;arg=unquote(arg);if(!strcmp(cmd,"exit")||!strcmp(cmd,"quit"))break;if(!strcmp(cmd,"help")){console_help();continue;}if(!strcmp(cmd,"status")){if(loaded)print_model_summary(path,&m,&c,step);else puts("No model loaded.");continue;}if(!strcmp(cmd,"load")){const char*target=*arg?arg:"models/trance1-stem-3b.bin";if(console_load(target,&m,&c,&tok,&z,&step)){strncpy(path,target,sizeof(path)-1);path[sizeof(path)-1]=0;loaded=1;print_model_summary(path,&m,&c,step);}else fprintf(stderr,"error: cannot open %s\n",target);continue;}if(!strcmp(cmd,"inspect")){inspect(*arg?arg:(loaded?path:"models/trance1-stem-3b.bin"));continue;}if(!strcmp(cmd,"test")){run_tests();continue;}if(!strcmp(cmd,"train")){const char*config=*arg?arg:"configs/trance1.json";Config trained;config_load(config,&trained);train(config);if(console_load(trained.output,&m,&c,&tok,&z,&step)){strncpy(path,trained.output,sizeof(path)-1);path[sizeof(path)-1]=0;loaded=1;print_model_summary(path,&m,&c,step);}continue;}if(!loaded){puts("No model loaded. Use train, load, inspect, help, or exit.");continue;}if(!strcmp(cmd,"chat")){chat_loop(&m,&c,&z,&tok,&seed);continue;}if(!strcmp(cmd,"prompt")){if(!*arg)puts("usage: prompt \"your message\"");else ask_model(&m,&c,&z,&tok,arg,&seed,gen_safety_cap(&c));continue;}if(!strcmp(cmd,"generate")){if(!*arg)puts("usage: generate \"raw prompt\"");else generate(&m,&c,&z,&tok,arg,gen_safety_cap(&c),.8f,40,.95f,seed++,1);continue;}if(!strcmp(cmd,"evaluate")){Data raw,d;const char*data=*arg?arg:"data/trance1/validation.txt";raw=raw_file_list(data);d=bpe_encode_raw(&tok,&raw);printf("loss %.4f\n",evaluate(&m,&c,&z,&d));free(raw.x);free(raw.mask);free(d.x);free(d.mask);continue;}puts("Unknown command. Type help.");}if(loaded){cache_free(&z);model_free(&m);}}
 
 static void run_tests(void){
     Config c;Model m={0},loaded={0};Cache z;Tokenizer tok,loaded_tok;RNG r={123};
