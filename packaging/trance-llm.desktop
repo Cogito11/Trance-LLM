@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Trance LLM
+Comment=Local CUDA model chat, comparison, and training
+Exec=trance-llm
+Icon=trance-llm
+Categories=Science;Development;
+Terminal=false

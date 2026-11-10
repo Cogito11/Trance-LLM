@@ -1,0 +1,22 @@
+[
+  {"category":"conversation","prompt":"Hey there. What can we talk about?","check":"A short, natural greeting with a relevant suggestion; no invented personal history."},
+  {"category":"explanation","prompt":"Why do we have day and night on Earth?","check":"Earth rotates; the side facing the Sun has daylight. Clear sentences without repetition."},
+  {"category":"comparison","prompt":"How is a lake different from a river?","check":"A lake is a body of water surrounded by land; a river flows along a course. No irrelevant claims."},
+  {"category":"explanation","prompt":"Explain evaporation in one sentence a child could understand.","check":"One simple sentence explaining liquid water becoming water vapor."},
+  {"category":"instruction","prompt":"List exactly two things to pack for a picnic, without any explanation.","check":"Exactly two sensible items with no added explanation."},
+  {"category":"instruction","prompt":"Answer using only one word: Is a triangle a shape?","check":"Yes; one word only."},
+  {"category":"arithmetic","prompt":"I had eight buttons and gave three to a friend. How many buttons do I have left?","check":"Five buttons; short correct answer."},
+  {"category":"arithmetic","prompt":"A notebook costs seven dollars. I pay with ten dollars. How much change should I get?","check":"Three dollars; no unrelated content."},
+  {"category":"reading","prompt":"Uma left her hat on the green bench. Later, Leo sat on the red chair. Where is Uma's hat?","check":"On the green bench; does not confuse Uma with Leo."},
+  {"category":"reading","prompt":"Jade put a spoon into a white bowl and a fork into a black box. What did she put in the bowl?","check":"A spoon; no added objects or events."},
+  {"category":"extraction","prompt":"Extract only the animal from this sentence: The brown rabbit hid behind a rock.","check":"rabbit; no extra explanation."},
+  {"category":"rewrite","prompt":"Make this message friendlier: Your note is confusing. Explain it again.","check":"A polite request for clarification that preserves the meaning."},
+  {"category":"rewrite","prompt":"Make this sentence shorter without changing its meaning: We made the decision to leave early.","check":"A concise equivalent such as We decided to leave early."},
+  {"category":"summary","prompt":"Summarize in one sentence: Milo could not find his keys. He checked his jacket and found them in a pocket. By then, his train had left.","check":"One sentence preserving the found keys and missed train, with no invented details."},
+  {"category":"instruction","prompt":"Write exactly the words blue cup. Do not add punctuation or any other words.","check":"blue cup"},
+  {"category":"story","prompt":"Tell a three-sentence story about two friends fixing a broken kite.","check":"Exactly three coherent sentences with consistent characters and a relevant ending."},
+  {"category":"continuation","prompt":"Continue this story with one sentence: Ella planted a seed in a pot and watered it each day. A week later,","check":"A grammatical, coherent continuation about the seed or plant; no repeated fragments."},
+  {"category":"uncertainty","prompt":"How many pencils are in my drawer right now?","check":"Acknowledges that it lacks this information; does not invent a count."},
+  {"category":"uncertainty","prompt":"What color is the backpack I am holding?","check":"Acknowledges that it cannot see the backpack and cannot know its color from the prompt."},
+  {"category":"correction","prompt":"Someone says that all birds can fly. Is that true? Give one counterexample.","check":"No; gives one valid example such as a penguin or ostrich in clear text."}
+]

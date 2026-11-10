@@ -1,0 +1,86 @@
+[
+  {
+    "id": "start",
+    "section": "Getting started",
+    "title": "What is a language model?",
+    "file": "start.md"
+  },
+  {
+    "id": "tokens",
+    "section": "Getting started",
+    "title": "Tokens and the BPE tokenizer",
+    "file": "tokens.md"
+  },
+  {
+    "id": "embeddings",
+    "section": "Inside Trance",
+    "title": "Embeddings and positions",
+    "file": "embeddings.md"
+  },
+  {
+    "id": "attention",
+    "section": "Inside Trance",
+    "title": "Causal attention and heads",
+    "file": "attention.md"
+  },
+  {
+    "id": "blocks",
+    "section": "Inside Trance",
+    "title": "Feed-forward, residuals and LayerNorm",
+    "file": "blocks.md"
+  },
+  {
+    "id": "output",
+    "section": "Inside Trance",
+    "title": "The output head and probabilities",
+    "file": "output.md"
+  },
+  {
+    "id": "training",
+    "section": "Getting started",
+    "title": "How training learns",
+    "file": "training.md"
+  },
+  {
+    "id": "losses",
+    "section": "Training and use",
+    "title": "Loss, validation and overfitting",
+    "file": "losses.md"
+  },
+  {
+    "id": "sampling",
+    "section": "Training and use",
+    "title": "How a reply is generated",
+    "file": "sampling.md"
+  },
+  {
+    "id": "configs",
+    "section": "Training and use",
+    "title": "Creating a training config",
+    "file": "configs.md"
+  },
+  {
+    "id": "data",
+    "section": "Training and use",
+    "title": "Conversation data and held-out splits",
+    "file": "data.md"
+  },
+  {
+    "id": "checkpoints",
+    "section": "Training and use",
+    "title": "Checkpoints and resuming",
+    "file": "checkpoints.md"
+  },
+  {
+    "id": "hardware",
+    "section": "Inside Trance",
+    "title": "CUDA, memory and model size",
+    "file": "hardware.md"
+  },
+  {
+    "id": "processes",
+    "section": "Training and use",
+    "title": "The GUI and background processes",
+    "file": "processes.md"
+  }
+]

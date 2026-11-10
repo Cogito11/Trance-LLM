@@ -1,0 +1,82 @@
+[
+  {
+    "category": "heldout_reading",
+    "prompt": "Read the passage and answer briefly.\nPassage: In the 1910s, New York–based filmmakers were attracted to Jacksonville's warm climate, exotic locations, excellent rail access, and cheap labor. Over the course of the decade, more than 30 silent film studios were established, earning Jacksonville the title of \"Winter Film Capital of the World\". However, the emergence of Hollywood as a major film production center ended the city's film industry. One converted movie studio site, Norman Studios, remains in Arlington; It has been converted to the Jacksonville Silent Film Museum at Norman Studios.\nQuestion: What brought the downfall of Jacksonville filmmaking?",
+    "expected_answer": "Hollywood",
+    "check": "Answer briefly using the supplied passage; preserve the answer meaning.",
+    "source": "data/trance12_curriculum/reading_validation.txt"
+  },
+  {
+    "category": "heldout_reading",
+    "prompt": "Read the passage and answer briefly.\nPassage: It also became clear that Apollo would outgrow the Canaveral launch facilities in Florida. The two newest launch complexes were already being built for the Saturn I and IB rockets at the northernmost end: LC-34 and LC-37. But an even bigger facility would be needed for the mammoth rocket required for the manned lunar mission, so land acquisition was started in July 1961 for a Launch Operations Center (LOC) immediately north of Canaveral at Merritt Island. The design, development and construction of the center was conducted by Kurt H. Debus, a member of Dr. Wernher von Braun's original V-2 rocket engineering team. Debus was named the LOC's first Director. Construction began in November 1962. Upon Kennedy's death, President Johnson issued an executive order on November 29, 1963, to rename the LOC and Cape Canaveral in honor of Kennedy.\nQuestion: Kurt H. Debus was appointed what position for the Launch Operations Center?",
+    "expected_answer": "Director",
+    "check": "Answer briefly using the supplied passage; preserve the answer meaning.",
+    "source": "data/trance12_curriculum/reading_validation.txt"
+  },
+  {
+    "category": "heldout_reading",
+    "prompt": "Read the passage and answer briefly.\nPassage: The flow of cold, gray mountain water continues for some distance into the lake. The cold water flows near the surface and at first doesn't mix with the warmer, green waters of Upper Lake. But then, at the so-called Rheinbrech, the Rhine water abruptly falls into the depths because of the greater density of cold water. The flow reappears on the surface at the northern (German) shore of the lake, off the island of Lindau. The water then follows the northern shore until Hagnau am Bodensee. A small fraction of the flow is diverted off the island of Mainau into Lake Überlingen. Most of the water flows via the Constance hopper into the Rheinrinne (\"Rhine Gutter\") and Seerhein. Depending on the water level, this flow of the Rhine water is clearly visible along the entire length of the lake.\nQuestion: Why does the Rhine water fall into depths at the Rheinbrech?",
+    "expected_answer": "greater density of cold water",
+    "check": "Answer briefly using the supplied passage; preserve the answer meaning.",
+    "source": "data/trance12_curriculum/reading_validation.txt"
+  },
+  {
+    "category": "heldout_reading",
+    "prompt": "Read the passage and answer briefly.\nPassage: A number of Huguenots served as mayors in Dublin, Cork, Youghal and Waterford in the 17th and 18th centuries. Numerous signs of Huguenot presence can still be seen with names still in use, and with areas of the main towns and cities named after the people who settled there. Examples include the Huguenot District and French Church Street in Cork City; and D'Olier Street in Dublin, named after a High Sheriff and one of the founders of the Bank of Ireland. A French church in Portarlington dates back to 1696, and was built to serve the significant new Huguenot community in the town. At the time, they constituted the majority of the townspeople.\nQuestion: The French church in Portarlington was built when?",
+    "expected_answer": "1696",
+    "check": "Answer briefly using the supplied passage; preserve the answer meaning.",
+    "source": "data/trance12_curriculum/reading_validation.txt"
+  },
+  {
+    "category": "heldout_reading",
+    "prompt": "Read the passage and answer briefly.\nPassage: The city developed around the Roman settlement Pons Aelius and was named after the castle built in 1080 by Robert Curthose, William the Conqueror's eldest son. The city grew as an important centre for the wool trade in the 14th century, and later became a major coal mining area. The port developed in the 16th century and, along with the shipyards lower down the River Tyne, was amongst the world's largest shipbuilding and ship-repairing centres. Newcastle's economy includes corporate headquarters, learning, digital technology, retail, tourism and cultural centres, from which the city contributes £13 billion towards the United Kingdom's GVA. Among its icons are Newcastle Brown Ale; Newcastle United football club; and the Tyne Bridge. It has hosted the world's most popular half marathon, the Great North Run, since it began in 1981.\nQuestion: What century was Newcastle's port developed in?",
+    "expected_answer": "16th century",
+    "check": "Answer briefly using the supplied passage; preserve the answer meaning.",
+    "source": "data/trance12_curriculum/reading_validation.txt"
+  },
+  {
+    "category": "heldout_reading",
+    "prompt": "Read the passage and answer briefly.\nPassage: The largest share of Kenya's electricity supply comes from hydroelectric stations at dams along the upper Tana River, as well as the Turkwel Gorge Dam in the west. A petroleum-fired plant on the coast, geothermal facilities at Olkaria (near Nairobi), and electricity imported from Uganda make up the rest of the supply. Kenya's installed capacity stood at 1,142 megawatts between 2001 and 2003. The state-owned Kenya Electricity Generating Company (KenGen), established in 1997 under the name of Kenya Power Company, handles the generation of electricity, while Kenya Power handles the electricity transmission and distribution system in the country. Shortfalls of electricity occur periodically, when drought reduces water flow. To become energy sufficient, Kenya aims to build a nuclear power plant by 2017.\nQuestion: When was Kenya Electricity Generating Company established?",
+    "expected_answer": "1997",
+    "check": "Answer briefly using the supplied passage; preserve the answer meaning.",
+    "source": "data/trance12_curriculum/reading_validation.txt"
+  },
+  {
+    "category": "heldout_reading",
+    "prompt": "Read the passage and answer briefly.\nPassage: However, this oft-quoted saying of Tetzel was by no means representative of contemporary Catholic teaching on indulgences, but rather a reflection of his capacity to exaggerate. Yet if Tetzel overstated the matter in regard to indulgences for the dead, his teaching on indulgences for the living was in line with Catholic dogma of the time.\nQuestion: Whose saying about freeing souls from purgatory was often quoted?",
+    "expected_answer": "Tetzel",
+    "check": "Answer briefly using the supplied passage; preserve the answer meaning.",
+    "source": "data/trance12_curriculum/reading_validation.txt"
+  },
+  {
+    "category": "heldout_reading",
+    "prompt": "Read the passage and answer briefly.\nPassage: Plague was reportedly first introduced to Europe via Genoese traders at the port city of Kaffa in the Crimea in 1347. After a protracted siege, during which the Mongol army under Jani Beg was suffering from the disease, the army catapulted the infected corpses over the city walls of Kaffa to infect the inhabitants. The Genoese traders fled, taking the plague by ship into Sicily and the south of Europe, whence it spread north. Whether or not this hypothesis is accurate, it is clear that several existing conditions such as war, famine, and weather contributed to the severity of the Black Death.\nQuestion: Who did the army siege belong to?",
+    "expected_answer": "Jani Beg",
+    "check": "Answer briefly using the supplied passage; preserve the answer meaning.",
+    "source": "data/trance12_curriculum/reading_validation.txt"
+  },
+  {
+    "category": "heldout_story_continuation",
+    "prompt": "Continue the story below:\nOnce upon a time, there was a little girl named Amy.",
+    "check": "Continue the supplied story coherently with consistent characters, grammatical sentences and a sensible ending; avoid repeated phrases.",
+    "source": "data/trance12_curriculum/stories_validation.txt"
+  },
+  {
+    "category": "heldout_story_continuation",
+    "prompt": "Continue the story below:\nOnce upon a time, there was a little girl named Lucy.",
+    "check": "Continue the supplied story coherently with consistent characters, grammatical sentences and a sensible ending; avoid repeated phrases.",
+    "source": "data/trance12_curriculum/stories_validation.txt"
+  },
+  {
+    "category": "heldout_story_continuation",
+    "prompt": "Continue the story below:\nOne day, a boy named Tim found a big lock.",
+    "check": "Continue the supplied story coherently with consistent characters, grammatical sentences and a sensible ending; avoid repeated phrases.",
+    "source": "data/trance12_curriculum/stories_validation.txt"
+  },
+  {
+    "category": "heldout_story_continuation",
+    "prompt": "Continue the story below:\nOnce upon a time, there was a little fish named Fin.",
+    "check": "Continue the supplied story coherently with consistent characters, grammatical sentences and a sensible ending; avoid repeated phrases.",
+    "source": "data/trance12_curriculum/stories_validation.txt"
+  }
+]

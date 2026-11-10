@@ -1,0 +1,12 @@
+[
+  {"prompt": "Hi! How are you?", "check": "A natural greeting and a coherent brief reply."},
+  {"prompt": "What is the difference between a cat and a dog?", "check": "A simple factual comparison."},
+  {"prompt": "Explain why the sky looks blue in two short sentences.", "check": "Two sentences; sunlight scattering; no invented claims."},
+  {"prompt": "Give me three ideas for a rainy afternoon.", "check": "Exactly three distinct relevant suggestions."},
+  {"prompt": "Rewrite this sentence more politely: Send me the file right now.", "check": "Preserves the request while softening its tone."},
+  {"prompt": "Summarize in one sentence: Maya missed the bus, walked to school, and arrived ten minutes late.", "check": "Accurate summary with no added events."},
+  {"prompt": "If I have three apples and get two more, how many apples do I have?", "check": "Five apples; a short clear answer."},
+  {"prompt": "What are two ways to organize my desk?", "check": "Two practical suggestions, coherent from start to end."},
+  {"prompt": "Tell me a short story about a lost puppy finding its home.", "check": "Consistent characters and a complete ending."},
+  {"prompt": "Why do plants need water?", "check": "A simple correct explanation without repetition."}
+]

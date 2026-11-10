@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+trance_project_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+cd "$trance_project_dir"
+trance_local_libs="$trance_project_dir/.venv-gui/native-deps/root/usr/lib/x86_64-linux-gnu"
+if [ -d "$trance_local_libs" ]; then
+    export LD_LIBRARY_PATH="$trance_local_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+if [ ! -x .venv-gui/bin/python ]; then
+    echo "Create the GUI environment first: python3 -m venv .venv-gui"
+    echo "Then install: .venv-gui/bin/python -m pip install -r gui/requirements.txt"
+    exit 1
+fi
+exec .venv-gui/bin/python -m gui "$@"

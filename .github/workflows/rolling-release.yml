@@ -109,7 +109,11 @@ jobs:
             done
           fi
           cp -r configs "$pkg/configs"
-          cp README.md LICENSE "$pkg/" 2>/dev/null || true
+          cp -r gui tests tools packaging "$pkg/"
+          cp -r native "$pkg/"
+          cp trance.cu "$pkg/"
+          cp trance-gui "$pkg/"
+          cp README.md LICENSE LLMS_EXPLAINED.md TRANCE.md "$pkg/"
           mkdir -p dist
           PY=$(command -v python || command -v python3)
           "$PY" -m zipfile -c "dist/${pkg}.zip" "$pkg"

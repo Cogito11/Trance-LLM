@@ -24,10 +24,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
+#include <limits.h>
+#include <chrono>
+#include "native/json.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
-#define TRANCE_VERSION "Beta 18" /* user-facing release name: shown in the REPL banner,
+#define TRANCE_VERSION "Beta 19" /* user-facing release name: shown in the REPL banner,
                                    * usage text, and model summary. Bump this string
                                    * alone when cutting a new release; it is unrelated
                                    * to the on-disk format VERSION below. */
@@ -60,6 +70,17 @@
 static cublasHandle_t g_blas;
 static float *g_ones = NULL;
 static int g_ones_cap = 0;
+static bool g_json_events = false;
+static volatile sig_atomic_t g_stop_training = 0;
+static volatile sig_atomic_t g_cancel_generation = 0;
+static const char *g_stop_file = NULL;
+static void stop_training_signal(int) { g_stop_training = 1; }
+static void cancel_generation_signal(int) { g_cancel_generation = 1; }
+static bool training_stop_requested() {
+    if(g_stop_training) return true;
+    if(g_stop_file) { FILE *f=fopen(g_stop_file,"rb"); if(f) { fclose(f); g_stop_training=1; } }
+    return g_stop_training!=0;
+}
 static void ensure_ones(int n) {
     if (n <= g_ones_cap) return;
     if (g_ones) cudaFree(g_ones);
@@ -502,7 +523,9 @@ static float backward(Model*m,const Config*c,Cache*z,const int*ids,const int*tar
 typedef struct { char magic[8]; uint32_t version,dtype; FileHeader f; } DiskHeader;
 static int tensors(Model*m,Tensor***out){int n=6+m->nt,i=0;Tensor**a=(Tensor**)xmalloc((size_t)n*sizeof(*a));a[i++]=&m->tok;a[i++]=&m->pos;a[i++]=&m->lnfg;a[i++]=&m->lnfb;a[i++]=&m->headw;a[i++]=&m->headb;for(;i<n;i++)a[i]=&m->p[i-6];*out=a;return n;}
 static void save_file(const char*path,Model*m,const Config*c,uint64_t step,int opt){
-    DiskHeader h={0};Tensor**a;int n,i;FILE*f=fopen(path,"wb");CHECK(f,"cannot write %s: %s",path,strerror(errno));
+    DiskHeader h={0};Tensor**a;int n,i;
+    std::string temp_path=std::string(path)+".tmp";
+    FILE*f=fopen(temp_path.c_str(),"wb");CHECK(f,"cannot write %s: %s",path,strerror(errno));
     memcpy(h.magic,MAGIC,7);h.version=VERSION;h.dtype=1;
     h.f.vocab=c->vocab;h.f.ctx=c->ctx;h.f.d=c->d;h.f.layers=c->layers;h.f.heads=c->heads;h.f.ff=c->ff;h.f.step=step;h.f.has_optimizer=(uint32_t)opt;
     CHECK(fwrite(&h,sizeof h,1,f)==1,"write header failed");
@@ -519,7 +542,12 @@ static void save_file(const char*path,Model*m,const Config*c,uint64_t step,int o
         }
         free(buf);
     }
-    free(a);fclose(f);
+    free(a);CHECK(fclose(f)==0,"cannot flush %s",path);
+#ifdef _WIN32
+    CHECK(MoveFileExA(temp_path.c_str(),path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH),"cannot commit %s (Windows error %lu)",path,GetLastError());
+#else
+    CHECK(rename(temp_path.c_str(),path)==0,"cannot commit %s: %s",path,strerror(errno));
+#endif
 }
 static void save_model(const char*p,Model*m,const Config*c,uint64_t step){save_file(p,m,c,step,0);}
 static void save_checkpoint(const char*p,Model*m,const Config*c,uint64_t step){save_file(p,m,c,step,1);}
@@ -570,13 +598,45 @@ static void adam(Model*m,const Config*c,uint64_t step){
 /* ===================== config / tokenizer (unchanged, host-only) ===================== */
 
 static void defaults(Config*c){memset(c,0,sizeof(*c));c->vocab=BASE_VOCAB;c->ctx=32;c->d=48;c->layers=2;c->heads=4;c->ff=192;c->batch=2;c->steps=100;c->eval_every=20;c->ckpt_every=50;c->lr=.002f;c->beta1=.9f;c->beta2=.999f;c->eps=1e-8f;c->weight_decay=0;c->clip=1.f;c->seed=42;strcpy(c->output,"models/trance1-stem-3b.bin");}
-static const char*find_key(const char*s,const char*k){static char pat[128];snprintf(pat,sizeof pat,"\"%s\"",k);s=strstr(s,pat);if(!s)return NULL;s=strchr(s+strlen(pat),':');return s?s+1:NULL;}
-static void json_int(const char*s,const char*k,int*x){const char*p=find_key(s,k);if(p)*x=(int)strtol(p,NULL,10);}
-static void json_u64(const char*s,const char*k,uint64_t*x){const char*p=find_key(s,k);if(p)*x=(uint64_t)strtoull(p,NULL,10);}
-static void json_float(const char*s,const char*k,float*x){const char*p=find_key(s,k);if(p)*x=strtof(p,NULL);}
-static void json_str(const char*s,const char*k,char*x){const char*p=find_key(s,k);if(!p)return;while(*p&&*p!='\"')p++;if(*p=='\"'){p++;size_t n=0;while(p[n]&&p[n]!='\"'&&n<MAX_PATH-1){x[n]=p[n];n++;}x[n]=0;}}
 static char*read_text(const char*path,size_t*out){FILE*f=fopen(path,"rb");long n;char*s;CHECK(f,"cannot read %s: %s",path,strerror(errno));fseek(f,0,SEEK_END);n=ftell(f);fseek(f,0,SEEK_SET);CHECK(n>=0,"cannot size %s",path);s=(char*)xmalloc((size_t)n+1);CHECK(fread(s,1,(size_t)n,f)==(size_t)n,"cannot read %s",path);s[n]=0;fclose(f);if(out)*out=(size_t)n;return s;}
-static void config_load(const char*path,Config*c){size_t n;char*s;defaults(c);s=read_text(path,&n);(void)n;json_int(s,"vocab_size",&c->vocab);json_int(s,"context_length",&c->ctx);json_int(s,"embedding_dim",&c->d);json_int(s,"layers",&c->layers);json_int(s,"attention_heads",&c->heads);json_int(s,"feed_forward_dim",&c->ff);json_int(s,"batch_size",&c->batch);json_int(s,"training_steps",&c->steps);json_int(s,"eval_interval",&c->eval_every);json_int(s,"checkpoint_interval",&c->ckpt_every);json_float(s,"learning_rate",&c->lr);json_float(s,"gradient_clip",&c->clip);json_u64(s,"seed",&c->seed);json_str(s,"train_data",c->train);json_str(s,"validation_data",c->valid);json_str(s,"output_model",c->output);json_str(s,"resume_model",c->resume);free(s);CHECK(c->heads>0,"attention_heads must be positive");CHECK(c->d>0,"embedding_dim must be positive");CHECK(c->vocab>=BASE_VOCAB&&c->d%c->heads==0&&c->ctx>1&&c->layers>0&&c->ff>0,"invalid config (vocab_size must be >= 259, attention_heads must divide embedding_dim)");CHECK(c->batch>0,"batch_size must be positive");CHECK(c->steps>0,"training_steps must be positive");CHECK(c->lr>0&&finite(c->lr),"learning_rate must be a positive finite number");CHECK(c->clip>0&&finite(c->clip),"gradient_clip must be a positive finite number");CHECK(c->eval_every>=0&&c->ckpt_every>=0,"eval_interval and checkpoint_interval must not be negative");CHECK(c->ctx<=1024,"context_length must be <= 1024 in this build");CHECK(c->vocab<=MAX_VOCAB,"vocab_size must be <= %d",MAX_VOCAB);}
+static void config_load(const char *path, Config *c) {
+    defaults(c); size_t n; char *text=read_text(path,&n);
+    try {
+        tj::Value j=tj::parse(std::string(text,n));
+        if(j.type!=tj::Value::Object) throw std::runtime_error("configuration must be a JSON object");
+        auto integer=[&](const char *key,int *dest) {
+            if(!j.has(key)) return; double v=j.at(key).numeric();
+            if(floor(v)!=v || v<INT_MIN || v>INT_MAX) throw std::runtime_error(std::string("invalid integer: ")+key);
+            *dest=(int)v;
+        };
+        auto scalar=[&](const char *key,float *dest) { if(j.has(key)) *dest=(float)j.at(key).numeric(); };
+        auto filename=[&](const char *key,char *dest) {
+            if(!j.has(key)) return; std::string v=j.at(key).text();
+            if(v.size()>=MAX_PATH || v.find('\0')!=std::string::npos) throw std::runtime_error(std::string("invalid path: ")+key);
+            memcpy(dest,v.c_str(),v.size()+1);
+        };
+        integer("vocab_size",&c->vocab); integer("context_length",&c->ctx); integer("embedding_dim",&c->d);
+        integer("layers",&c->layers); integer("attention_heads",&c->heads); integer("feed_forward_dim",&c->ff);
+        integer("batch_size",&c->batch); integer("training_steps",&c->steps);
+        integer("eval_interval",&c->eval_every); integer("checkpoint_interval",&c->ckpt_every);
+        scalar("learning_rate",&c->lr); scalar("gradient_clip",&c->clip);
+        if(j.has("seed")) {
+            double v=j.at("seed").numeric();
+            if(v<0 || v>=18446744073709551616.0 || floor(v)!=v) throw std::runtime_error("invalid seed");
+            c->seed=(uint64_t)v;
+        }
+        filename("train_data",c->train); filename("validation_data",c->valid);
+        filename("output_model",c->output); filename("resume_model",c->resume);
+    } catch(const std::exception &e) { free(text); CHECK(false,"invalid config %s: %s",path,e.what()); }
+    free(text);
+    CHECK(c->heads>0,"attention_heads must be positive"); CHECK(c->d>0,"embedding_dim must be positive");
+    CHECK(c->vocab>=BASE_VOCAB && c->d%c->heads==0 && c->ctx>1 && c->layers>0 && c->ff>0,"invalid architecture");
+    CHECK(c->batch>0 && c->steps>0,"batch_size and training_steps must be positive");
+    CHECK(c->lr>0 && finite(c->lr),"learning_rate must be a positive finite number");
+    CHECK(c->clip>0 && finite(c->clip),"gradient_clip must be a positive finite number");
+    CHECK(c->eval_every>=0 && c->ckpt_every>=0,"intervals must not be negative");
+    CHECK(c->ctx<=1024 && c->vocab<=MAX_VOCAB,"context_length and vocab_size must be <= 1024");
+}
 
 /* Reads training text and also tracks a per-byte loss mask: 1 while inside
  * an <assistant>...<eot> span (including the <assistant> marker itself and
@@ -825,18 +885,80 @@ static const char*now_str(void){
     strftime(buf,sizeof buf,"%Y-%m-%d %H:%M:%S",tmv);
     return buf;
 }
-static void train(const char*config_path){Config c;Model m={0};Cache z;Data rawtrain,rawvalid={0},trainset={0},valid={0};Tokenizer tok;RNG rng;uint64_t step=0,end_step;int *ids,*targets,b,t;unsigned char *lmask;float *rownorm;char tokpath[MAX_PATH+80];config_load(config_path,&c);CHECK(c.ctx<=1024&&c.steps>0&&c.vocab<=MAX_VOCAB,"invalid context, steps, or BPE vocabulary size");CHECK(c.batch>0,"batch_size must be positive");ids=(int*)xmalloc((size_t)c.batch*c.ctx*sizeof(int));targets=(int*)xmalloc((size_t)c.batch*c.ctx*sizeof(int));lmask=(unsigned char*)xmalloc((size_t)c.batch*c.ctx);rownorm=(float*)xmalloc((size_t)c.batch*c.ctx*sizeof(float));rng.state=c.seed?c.seed:1;rawtrain=raw_file_list(c.train);if(c.resume[0]){tokenizer_path(tokpath,sizeof tokpath,c.resume);CHECK(tokenizer_load(tokpath,&tok),"could not load tokenizer %s",tokpath);CHECK(load_checkpoint(c.resume,&m,&c,&step),"could not load %s",c.resume);CHECK(c.vocab==tok.n,"model/tokenizer vocabulary mismatch");trainset=bpe_encode_raw(&tok,&rawtrain);free(rawtrain.x);free(rawtrain.mask);printf("[%s] [INFO] resumed %s at step %llu\n",now_str(),c.resume,(unsigned long long)step);}else{Data toksample=sample_for_tokenizer_training(&rawtrain,c.seed?c.seed:1,TOKENIZER_SAMPLE_CAP);printf("[%s] [INFO] training tokenizer on a %.1fMB sample (dataset is %.1fMB)\n",now_str(),toksample.n/1e6,(double)rawtrain.n/1e6);bpe_train(&tok,&toksample,c.vocab);free(toksample.x);c.vocab=tok.n;trainset=bpe_encode_raw(&tok,&rawtrain);free(rawtrain.x);free(rawtrain.mask);model_init(&m,&c,&rng);}end_step=step+(uint64_t)c.steps;z=cache_new(&c);if(c.valid[0]){rawvalid=raw_file_list(c.valid);valid=bpe_encode_raw(&tok,&rawvalid);free(rawvalid.x);free(rawvalid.mask);}
-    printf("== Training ==\n");
-    printf("[%s] [INFO] model: BPE vocab=%d, %d layers, d=%d, heads=%d, context=%d, %.2fM parameters\n",now_str(),tok.n,c.layers,c.d,c.heads,c.ctx,parameter_count(&m)/1e6);
+// Preserve the sampled conversation start even near EOF. Moving an entire
+// short window backwards changes its prompt/position context and repeatedly
+// samples the same tail. EOT padding has no supervised targets.
+static void training_window(const Data *data,size_t start,int T,int *ids,int *targets,unsigned char *mask){
+    CHECK(start<data->n,"training window starts outside the corpus");
+    for(int t=0;t<T;t++) {
+        size_t pos=start+(size_t)t;
+        ids[t]=pos<data->n ? data->x[pos] : EOT;
+        targets[t]=pos+1<data->n ? data->x[pos+1] : EOT;
+        mask[t]=pos+1<data->n ? (data->mask ? data->mask[pos+1] : 1) : 0;
+    }
+}
+static void train(const char*config_path) {
+    Config c; Model m={0}; Cache z; Data rawtrain,rawvalid={0},trainset={0},valid={0};
+    Tokenizer tok; RNG rng; uint64_t step=0,end_step,last_completed;
+    int *ids,*targets,b; unsigned char *lmask; float *rownorm;
+    char tokpath[MAX_PATH+80];
+    config_load(config_path,&c);
+    g_stop_training=0;
+    auto old_int=signal(SIGINT,stop_training_signal);
+    auto old_term=signal(SIGTERM,stop_training_signal);
+    ids=(int*)xmalloc((size_t)c.batch*c.ctx*sizeof(int));
+    targets=(int*)xmalloc((size_t)c.batch*c.ctx*sizeof(int));
+    lmask=(unsigned char*)xmalloc((size_t)c.batch*c.ctx);
+    rownorm=(float*)xmalloc((size_t)c.batch*c.ctx*sizeof(float));
+    rng.state=c.seed?c.seed:1;
+    if(g_json_events) { tj::Value e=tj::event("stage"); e.object["stage"]="Loading training data"; tj::emit(e); }
+    rawtrain=raw_file_list(c.train);
+    if(c.resume[0]) {
+        tokenizer_path(tokpath,sizeof tokpath,c.resume);
+        CHECK(tokenizer_load(tokpath,&tok),"could not load tokenizer %s",tokpath);
+        CHECK(load_checkpoint(c.resume,&m,&c,&step),"could not load %s",c.resume);
+        CHECK(c.vocab==tok.n,"model/tokenizer vocabulary mismatch");
+        trainset=bpe_encode_raw(&tok,&rawtrain);
+        free(rawtrain.x); free(rawtrain.mask);
+        if(!g_json_events) printf("[%s] [INFO] resumed %s at step %llu\n",now_str(),c.resume,(unsigned long long)step);
+    } else {
+        Data toksample=sample_for_tokenizer_training(&rawtrain,c.seed?c.seed:1,TOKENIZER_SAMPLE_CAP);
+        if(g_json_events) { tj::Value e=tj::event("stage"); e.object["stage"]="Learning tokenizer"; tj::emit(e); }
+        else printf("[%s] [INFO] training tokenizer on a %.1fMB sample (dataset is %.1fMB)\n",now_str(),toksample.n/1e6,(double)rawtrain.n/1e6);
+        bpe_train(&tok,&toksample,c.vocab); free(toksample.x); c.vocab=tok.n;
+        if(g_json_events) { tj::Value e=tj::event("stage"); e.object["stage"]="Encoding corpus"; tj::emit(e); }
+        trainset=bpe_encode_raw(&tok,&rawtrain);
+        free(rawtrain.x); free(rawtrain.mask); model_init(&m,&c,&rng);
+    }
+    CHECK(trainset.n>(size_t)c.ctx+1,"training data must exceed context_length + 1 tokens");
+    end_step=step+(uint64_t)c.steps; last_completed=step;
+    z=cache_new(&c);
+    if(c.valid[0]) {
+        rawvalid=raw_file_list(c.valid); valid=bpe_encode_raw(&tok,&rawvalid);
+        free(rawvalid.x); free(rawvalid.mask);
+    }
+    if(!g_json_events) {
+        printf("== Training ==\n");
+        printf("[%s] [INFO] model: BPE vocab=%d, %d layers, d=%d, heads=%d, context=%d, %.2fM parameters\n",now_str(),tok.n,c.layers,c.d,c.heads,c.ctx,parameter_count(&m)/1e6);
+    }
     /* Conversation boundaries: position 0 and every position right after an
      * EOT are conversation starts. Used below to sample whole conversations
      * (or windows within long ones) instead of arbitrary byte offsets. */
     size_t n_convs=0,conv_cap=64,*conv_starts=(size_t*)xmalloc(conv_cap*sizeof(size_t));
     conv_starts[n_convs++]=0;
-    { size_t ii; for(ii=0;ii<trainset.n;ii++) if(trainset.x[ii]==EOT&&ii+1<trainset.n){ if(n_convs>=conv_cap){conv_cap*=2;conv_starts=(size_t*)realloc(conv_starts,conv_cap*sizeof(size_t));CHECK(conv_starts,"out of memory");} conv_starts[n_convs++]=ii+1; } }
-    printf("[%s] [INFO] %zu conversations found for window sampling\n",now_str(),n_convs);
-    printf("-------------------\n");
-    for(step++;step<=end_step;step++){float loss=0;zero_grads(&m);
+    { size_t ii; for(ii=0;ii<trainset.n;ii++) if(trainset.x[ii]==EOT&&ii+1<trainset.n&&trainset.x[ii+1]!=EOT){ if(n_convs>=conv_cap){conv_cap*=2;conv_starts=(size_t*)realloc(conv_starts,conv_cap*sizeof(size_t));CHECK(conv_starts,"out of memory");} conv_starts[n_convs++]=ii+1; } }
+    if(g_json_events) {
+        tj::Value e=tj::event("training_started"); e.object["step"]=(double)step;
+        e.object["end_step"]=(double)end_step; e.object["parameters"]=(double)parameter_count(&m);
+        e.object["conversations"]=(double)n_convs; tj::emit(e);
+    } else {
+        printf("[%s] [INFO] %zu conversations found for window sampling\n",now_str(),n_convs);
+        printf("-------------------\n");
+    }
+    auto begin=std::chrono::steady_clock::now();
+    uint64_t first_step=step+1;
+    for(step++;step<=end_step && !training_stop_requested();step++) {
+        float loss=0; zero_grads(&m);
         /* Build one flat batch: c.batch sequences of length c.ctx, back to
          * back in ids/targets. A single forward+backward call below then
          * processes the whole batch as one batched pass instead of looping
@@ -848,12 +970,7 @@ static void train(const char*config_path){Config c;Model m={0};Cache z;Data rawt
             size_t start;
             if(clen<=(size_t)c.ctx+1) start=cstart; /* whole (short) conversation; naturally spills into the next one, which is fine -- eot/mask boundaries stay correct */
             else { size_t span=clen-c.ctx-1; start=cstart+(size_t)(frand(&rng)*(span+1)); }
-            if(start+(size_t)c.ctx+1>trainset.n) start=trainset.n-(size_t)c.ctx-1; /* safety clamp -- never falls back to offset 0 */
-            for(t=0;t<c.ctx;t++){
-                ids[b*c.ctx+t]=trainset.x[start+t];
-                targets[b*c.ctx+t]=trainset.x[start+t+1];
-                lmask[b*c.ctx+t]=trainset.mask?trainset.mask[start+t+1]:1;
-            }
+            training_window(&trainset,start,c.ctx,ids+b*c.ctx,targets+b*c.ctx,lmask+b*c.ctx);
         }
         /* Per-sequence loss normalizer: 1/(assistant-masked token count in
          * THAT sequence), not the old fixed 1/ctx -- see k_xent's comment. */
@@ -863,18 +980,47 @@ static void train(const char*config_path){Config c;Model m={0};Cache z;Data rawt
             for(t2=0;t2<c.ctx;t2++) rownorm[b*c.ctx+t2]=lmask[b*c.ctx+t2]?rn:0.f;
         }
         forward(&m,&c,&z,ids,c.batch);loss=backward(&m,&c,&z,ids,targets,lmask,rownorm,c.batch);
-        scale_grads(&m,1.f/c.batch);adam(&m,&c,step);if(step==1||(c.eval_every>0&&step%(uint64_t)c.eval_every==0)||step==end_step){float vl=valid.x?evaluate(&m,&c,&z,&valid):NAN;if(valid.x)printf("[%s] step %6llu | train_loss %8.4f | valid_loss %8.4f\n",now_str(),(unsigned long long)step,loss/c.batch,vl);else printf("[%s] step %6llu | train_loss %8.4f\n",now_str(),(unsigned long long)step,loss/c.batch);}if(c.ckpt_every>0&&step%(uint64_t)c.ckpt_every==0){char path[MAX_PATH+64];snprintf(path,sizeof path,"%s.step%llu.bin",c.output,(unsigned long long)step);save_checkpoint(path,&m,&c,step);tokenizer_path(tokpath,sizeof tokpath,path);tokenizer_save(tokpath,&tok);printf("[%s] [INFO] checkpoint saved: %s\n",now_str(),path);}}
-    save_model(c.output,&m,&c,end_step);tokenizer_path(tokpath,sizeof tokpath,c.output);tokenizer_save(tokpath,&tok);
-    printf("-------------------\n");
-    printf("[%s] [INFO] training complete -- saved model %s and tokenizer %s\n",now_str(),c.output,tokpath);
-    free(trainset.x);free(trainset.mask);free(valid.x);free(valid.mask);free(ids);free(targets);free(lmask);free(rownorm);free(conv_starts);cache_free(&z);model_free(&m);}
+
+        scale_grads(&m,1.f/c.batch); adam(&m,&c,step); last_completed=step;
+        bool eval_now=step==first_step || (c.eval_every>0 && step%(uint64_t)c.eval_every==0) || step==end_step;
+        float vl=eval_now && valid.x ? evaluate(&m,&c,&z,&valid) : NAN;
+        if(g_json_events && (eval_now || step%25==0 || g_stop_training)) {
+            tj::Value e=tj::event("progress"); e.object["step"]=(double)step; e.object["end_step"]=(double)end_step;
+            e.object["train_loss"]=(double)(loss/c.batch); e.object["valid_loss"]=(double)vl;
+            e.object["elapsed_seconds"]=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count(); tj::emit(e);
+        } else if(!g_json_events && eval_now) {
+            if(valid.x) printf("[%s] step %6llu | train_loss %8.4f | valid_loss %8.4f\n",now_str(),(unsigned long long)step,loss/c.batch,vl);
+            else printf("[%s] step %6llu | train_loss %8.4f\n",now_str(),(unsigned long long)step,loss/c.batch);
+        }
+        if(c.ckpt_every>0 && step%(uint64_t)c.ckpt_every==0) {
+            char path[MAX_PATH+64]; snprintf(path,sizeof path,"%s.step%llu.bin",c.output,(unsigned long long)step);
+            save_checkpoint(path,&m,&c,step); tokenizer_path(tokpath,sizeof tokpath,path); tokenizer_save(tokpath,&tok);
+            if(g_json_events) { tj::Value e=tj::event("checkpoint"); e.object["path"]=path; e.object["step"]=(double)step; tj::emit(e); }
+            else printf("[%s] [INFO] checkpoint saved: %s\n",now_str(),path);
+        }
+    }
+    if(last_completed<end_step) {
+        char path[MAX_PATH+64]; snprintf(path,sizeof path,"%s.interrupted.bin",c.output);
+        save_checkpoint(path,&m,&c,last_completed); tokenizer_path(tokpath,sizeof tokpath,path); tokenizer_save(tokpath,&tok);
+        if(g_json_events) { tj::Value e=tj::event("stopped"); e.object["path"]=path; e.object["step"]=(double)last_completed; tj::emit(e); }
+        else printf("[%s] [INFO] stopped at step %llu; resumable checkpoint saved: %s\n",now_str(),(unsigned long long)last_completed,path);
+    } else {
+        save_model(c.output,&m,&c,end_step); tokenizer_path(tokpath,sizeof tokpath,c.output); tokenizer_save(tokpath,&tok);
+        if(g_json_events) { tj::Value e=tj::event("complete"); e.object["path"]=c.output; e.object["step"]=(double)end_step; tj::emit(e); }
+        else { printf("-------------------\n"); printf("[%s] [INFO] training complete -- saved model %s and tokenizer %s\n",now_str(),c.output,tokpath); }
+    }
+    signal(SIGINT,old_int); signal(SIGTERM,old_term);
+    free(trainset.x); free(trainset.mask); free(valid.x); free(valid.mask);
+    free(ids); free(targets); free(lmask); free(rownorm); free(conv_starts);
+    cache_free(&z); model_free(&m);
+}
 
 /* ===================== sampling / generation ===================== */
 
 typedef struct { float p; int id; } Candidate;
 static int cmp_candidate(const void*a,const void*b){float x=((const Candidate*)a)->p,y=((const Candidate*)b)->p;return x<y?1:x>y?-1:0;}
 static int sample_token(const float*logits,int V,float temp,int topk,float topp,RNG*r){Candidate*a=(Candidate*)xmalloc((size_t)V*sizeof(*a));int i,n=V;float mx=-FLT_MAX,sum=0,u,acc=0;if(temp<=0)temp=1e-5f;for(i=0;i<V;i++)if(logits[i]/temp>mx)mx=logits[i]/temp;for(i=0;i<V;i++){a[i].id=i;a[i].p=expf(logits[i]/temp-mx);sum+=a[i].p;}for(i=0;i<V;i++)a[i].p/=sum;qsort(a,(size_t)V,sizeof(*a),cmp_candidate);if(topk>0&&topk<n)n=topk;if(topp>0&&topp<1){float s=0;int keep=0;for(i=0;i<n;i++){s+=a[i].p;keep++;if(s>=topp)break;}n=keep;}sum=0;for(i=0;i<n;i++)sum+=a[i].p;u=frand(r)*sum;for(i=0;i<n;i++){acc+=a[i].p;if(acc>=u){int id=a[i].id;free(a);return id;}}i=a[n-1].id;free(a);return i;}
-static void generate(Model*m,const Config*c,Cache*z,const Tokenizer*tok,const char*prompt,int max,float temp,int topk,float topp,uint64_t seed,int show_prompt){
+static void generate(Model*m,const Config*c,Cache*z,const Tokenizer*tok,const char*prompt,int max,float temp,int topk,float topp,uint64_t seed,int show_prompt,bool chat_output=false){
     Data encoded=bpe_encode_text(tok,prompt);
     size_t cap=encoded.n+(size_t)max+2,outcap=(size_t)max*MAX_TOKEN_BYTES+1,outn=0;
     int *hist=(int*)xmalloc(cap*sizeof(int)),*work=(int*)xmalloc((size_t)c->ctx*sizeof(int));
@@ -899,12 +1045,13 @@ static void generate(Model*m,const Config*c,Cache*z,const Tokenizer*tok,const ch
         memcpy(out+outn,tok->bytes[id],tok->len[id]); outn+=tok->len[id]; out[outn]=0;
         hist[n++]=id;
     }
-    if(show_prompt)fputs(prompt,stdout); fputs(out,stdout); putchar('\n');
+    if(show_prompt)fputs(prompt,stdout); fputs(chat_output&&out[0]=='\n'?out+1:out,stdout); putchar('\n');
     free(out);free(hist);free(work);free(hostrow);
 }
 static void inspect(const char*path){Config c;Model m={0};uint64_t step;defaults(&c);CHECK(load_model(path,&m,&c,&step),"cannot load %s",path);Tensor**a;int n=tensors(&m,&a),i;size_t q=0;for(i=0;i<n;i++)q+=a[i]->n;printf("model: %s\ntrance version: %s, file format: %u, dtype: FP32\narchitecture: vocab=%d context=%d embedding=%d layers=%d heads=%d feed_forward=%d\nparameters: %zu\ntraining_step: %llu\n",path,TRANCE_VERSION,VERSION,c.vocab,c.ctx,c.d,c.layers,c.heads,c.ff,q,(unsigned long long)step);free(a);model_free(&m);}
 static void load_for_cli(const char*path,Model*m,Config*c,Tokenizer*t,uint64_t*step);
 static void run_tests(void);
+static std::string engine_prompt(const tj::Value &request,const Tokenizer *tok,int budget,int *token_count,int *dropped);
 static void gpu_name(char*buf,size_t n);
 
 static void print_model_summary(const char*path,Model*m,const Config*c,uint64_t step){printf("Loaded model: %s\n  BPE vocabulary: %d | context: %d | embedding: %d | layers: %d | heads: %d\n  parameters: %zu | training step: %llu\n",path,c->vocab,c->ctx,c->d,c->layers,c->heads,parameter_count(m),(unsigned long long)step);}
@@ -915,14 +1062,14 @@ static char *unquote(char*s){s=trim(s);size_t n=strlen(s);if(n>=2&&s[0]=='\"'&&s
  * generate()'s IS_SPECIAL check), so this exists only to bound the rare
  * case that never happens. Leaves room below c->ctx for the prompt itself. */
 static int gen_safety_cap(const Config*c){int n=c->ctx-64; if(n>400)n=400; if(n<32)n=32; return n;}
-static void ask_model(Model*m,const Config*c,Cache*z,const Tokenizer*tok,const char*message,uint64_t*seed,int max_new){char formatted[4600];CHECK(strlen(message)<4000,"message is too long");snprintf(formatted,sizeof formatted,"<user>\n%s\n\n<assistant>\n",message);fputs("assistant> ",stdout);
+static void ask_model(Model*m,const Config*c,Cache*z,const Tokenizer*tok,const char*message,uint64_t*seed,int max_new){char formatted[4600];CHECK(strlen(message)<4000,"message is too long");snprintf(formatted,sizeof formatted,"<user>\n%s\n\n<assistant>",message);fputs("assistant> ",stdout);
     /* temp .45/top-k 12 was conservative enough that the model would
      * repeatedly lock onto its own most-confident token and loop
      * ("memory memory memory..."), especially visible now that max_new
      * is large enough to let a loop run instead of being cut off early.
      * Higher temperature/top-k gives the sampler room to step away from
      * a token it just emitted instead of reinforcing it. */
-    generate(m,c,z,tok,formatted,max_new,.8f,40,.95f,(*seed)++,0);}
+    generate(m,c,z,tok,formatted,max_new,.8f,40,.95f,(*seed)++,0,true);}
 static void chat_loop(Model*m,const Config*c,Cache*z,const Tokenizer*tok,uint64_t*seed){
     char line[4096]; int max_new=gen_safety_cap(c);
     puts("Chat mode. Type a message; use /help for help or /exit to return to the main menu.");
@@ -963,6 +1110,41 @@ static void run_tests(void){
     tokenizer_init(&tok,BASE_VOCAB);tokenizer_save("/tmp/trance-tokenizer.bin",&tok);
     CHECK(tokenizer_load("/tmp/trance-tokenizer.bin",&loaded_tok)&&loaded_tok.n==BASE_VOCAB,"tokenizer vocabulary load");
     printf("[PASS] BPE tokenizer: save/load round-trip\n");
+    {
+        Tokenizer boundary; tokenizer_init(&boundary,BASE_VOCAB+1);
+        boundary.len[BASE_VOCAB]=2; memcpy(boundary.bytes[BASE_VOCAB],"\nH",2);
+        boundary.n++; g_tok_generation++;
+        tj::Value request=tj::parse("{\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}");
+        int count,dropped;
+        std::string prefix=engine_prompt(request,&boundary,1024,&count,&dropped);
+        Data prompt_ids=bpe_encode_text(&boundary,prefix.c_str());
+        Data full_ids=bpe_encode_text(&boundary,(prefix+"\nHello\n\n<eot>").c_str());
+        CHECK(prompt_ids.n>0&&prompt_ids.x[prompt_ids.n-1]==ASST_TOK,"chat prefix must end on the atomic assistant marker");
+        CHECK(full_ids.n>prompt_ids.n&&full_ids.x[prompt_ids.n]==BASE_VOCAB,"boundary test must merge the newline with H");
+        for(size_t j=0;j<prompt_ids.n;j++) CHECK(prompt_ids.x[j]==full_ids.x[j],"chat prompt differs from the teacher-forced token prefix");
+        free(prompt_ids.x);free(prompt_ids.mask);free(full_ids.x);free(full_ids.mask);
+        printf("[PASS] Chat prefix: matches training even with newline/answer BPE merges\n");
+    }
+    {
+        tj::Value request=tj::parse("{\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"},{\"role\":\"assistant\",\"content\":\"Hello\\n\\n\"},{\"role\":\"user\",\"content\":\"Again\"}]}");
+        int count,dropped;
+        std::string prefix=engine_prompt(request,&tok,1024,&count,&dropped);
+        CHECK(prefix=="<user>\nHi\n\n<assistant>\nHello\n\n<user>\nAgain\n\n<assistant>","chat history duplicated a generated turn separator");
+        printf("[PASS] Chat history: reconstructs one canonical turn separator\n");
+    }
+    {
+        tok_t stream[]={USER_TOK,65,ASST_TOK,10,72,EOT,USER_TOK,66,ASST_TOK,10,73,EOT,EOT};
+        unsigned char masks[]={0,0,1,1,1,1,0,0,1,1,1,1,0};
+        Data tail={stream,masks,13};int ids[16],targets[16];unsigned char mask[16];
+        training_window(&tail,6,16,ids,targets,mask);
+        CHECK(ids[0]==USER_TOK&&ids[1]==66,"EOF padding moved the sampled conversation backwards");
+        CHECK(targets[3]==73&&mask[3]==1&&targets[4]==EOT&&mask[4]==1,"EOF window lost assistant content or its EOT target");
+        for(int j=6;j<16;j++) CHECK(targets[j]==EOT&&mask[j]==0,"EOF padding created supervised targets");
+        for(int j=7;j<16;j++) CHECK(ids[j]==EOT,"EOF inputs were not padded");
+        training_window(&tail,0,4,ids,targets,mask);
+        for(int j=0;j<4;j++) CHECK(ids[j]==stream[j]&&targets[j]==stream[j+1]&&mask[j]==masks[j+1],"interior training window changed unexpectedly");
+        printf("[PASS] Training windows: preserve EOF conversation starts and mask padding\n");
+    }
     defaults(&c);c.vocab=BASE_VOCAB;c.ctx=4;c.d=8;c.layers=1;c.heads=2;c.ff=16;c.batch=1;
     model_init(&m,&c,&r);z=cache_new(&c);
     CHECK(parameter_count(&m)>0,"initialization parameter count");
@@ -1142,7 +1324,7 @@ static void run_tests(void){
     printf("[PASS] Generation: sampling ran without error\n");
     cache_free(&z);model_free(&m);
     printf("-------------------\n");
-    printf("All 15 checks passed.\n");
+    printf("All 18 checks passed.\n");
 }
 
 static void gpu_name(char*buf,size_t n){
@@ -1155,8 +1337,9 @@ static void gpu_name(char*buf,size_t n){
 }
 static void print_gpu_info(void){ char buf[320]; gpu_name(buf,sizeof buf); printf("GPU: %s\n",buf); }
 static const char*option(int argc,char**argv,const char*name){int i;for(i=0;i+1<argc;i++)if(!strcmp(argv[i],name))return argv[i+1];return NULL;}
-static void usage(void){printf("Trance LLM %s (GPU/CUDA build), trainable decoder-only Transformer\n\nInteractive use:\n  trance\n  trance> prompt \"Hello, how are you doing?\"\n\nCommands:\n  trance train --config configs/trance1.json\n  trance chat --model models/trance1-stem-3b.bin [--temperature .8 --top-k 40 --top-p .9 --max-new-tokens 80 --seed 1]\n  trance generate --model models/trance1-stem-3b.bin --prompt \"Explain a proton.\" [generation options]\n  trance evaluate --model models/trance1-stem-3b.bin --data data/trance1/validation.txt\n  trance inspect --model models/trance1-stem-3b.bin\n  trance test\n\nTokenizer: learned byte-pair vocabulary stored in MODEL.tok.\nRun 'trance test' first to check the CUDA kernels are numerically correct on your GPU.\n",TRANCE_VERSION);}
+static void usage(void){printf("Trance LLM %s (GPU/CUDA build), trainable decoder-only Transformer\n\nInteractive use:\n  trance\n  trance> prompt \"Hello, how are you doing?\"\n\nCommands:\n  trance train --config configs/trance1.json\n  trance chat --model models/trance1-stem-3b.bin [--temperature .8 --top-k 40 --top-p .9 --max-new-tokens 80 --seed 1]\n  trance generate --model models/trance1-stem-3b.bin --prompt \"Explain a proton.\" [generation options]\n  trance evaluate --model models/trance1-stem-3b.bin --data data/trance1/validation.txt\n  trance inspect --model models/trance1-stem-3b.bin\n  trance test\n\nTokenizer: learned byte-pair vocabulary stored in MODEL.tok.\nRun 'trance test' first to check the CUDA kernels are numerically correct on your GPU.\n",TRANCE_VERSION);puts("\nDesktop engine: trance engine (JSON-lines stdin/stdout)\nTraining events: trance train --config FILE --json-events [--stop-file PATH]\nDesktop app: ./trance-gui");}
 static void load_for_cli(const char*path,Model*m,Config*c,Tokenizer*t,uint64_t*step){char tokpath[MAX_PATH+8];defaults(c);CHECK(load_model(path,m,c,step),"cannot load model %s",path);tokenizer_path(tokpath,sizeof tokpath,path);CHECK(tokenizer_load(tokpath,t),"cannot load tokenizer %s (retrain this legacy model)",tokpath);CHECK(t->n==c->vocab,"model/tokenizer vocabulary mismatch");}
+#include "native/engine.h"
 int main(int argc,char**argv){
     int devcount=0; cudaGetDeviceCount(&devcount);
     if(devcount==0){ fprintf(stderr,"error: no CUDA-capable GPU detected on this machine\n"); return 1; }
@@ -1172,7 +1355,10 @@ int main(int argc,char**argv){
     const char*model,*prompt,*data,*cfg;Config c;Model m={0};Tokenizer tok;Cache z;uint64_t step;float temp=.8f,topp=.9f;int topk=40,max=80;
     setvbuf(stdout,NULL,_IONBF,0);
     if(argc<2){terminal_repl();return 0;}
-    print_gpu_info();
+    if(!strcmp(argv[1],"engine")){engine_loop();return 0;}
+    for(int i=2;i<argc;i++) if(!strcmp(argv[i],"--json-events")) g_json_events=true;
+    g_stop_file=option(argc,argv,"--stop-file");
+    if(!g_json_events) print_gpu_info();
     if(!strcmp(argv[1],"--help")||!strcmp(argv[1],"help")){usage();return 0;}
     if(!strcmp(argv[1],"test")){run_tests();return 0;}
     if(!strcmp(argv[1],"train")){cfg=option(argc,argv,"--config");if(!cfg&&argc>2)cfg=argv[2];CHECK(cfg,"train requires --config FILE");train(cfg);return 0;}

@@ -4,6 +4,8 @@ Trance LLM is an educational, compute-heavy, GPU-accelerated decoder-only Transf
 
 Everything else, the tokenizer, configuration parsing, file I/O, sampling, and the interactive CLI/REPL, runs on the host CPU.
 
+The [Trance 1.2 training record](TRANCE_1_2.md) documents the completed stages incorporated into the model, including data sources, training settings and measured results.
+
 ---
 
 ## Key Features
@@ -46,6 +48,21 @@ This runs a set of numerical tests: gradient checks (finite-difference compariso
 
 ## Usage
 
+### Desktop GUI
+
+Trance LLM provides streaming chat, persistent local conversations, sequential model comparison, and a training dashboard with checkpointed stopping and resume. Setup and usage are described in [gui/README.md](gui/README.md).
+
+```bash
+./tools/setup_gui.sh
+./trance-gui
+```
+
+Rebuild `trance` from the current source first if your binary predates the desktop engine protocol. Opening the GUI does not start training.
+
+The portable Linux AppImage bundles Python, Qt, the native engine and cuBLAS. It uses your existing project folder for models, configs and data. See [packaging/README.md](packaging/README.md) for launch and build instructions.
+
+Rebuild and verify the AppImage with `./tools/build_release.sh`. Add `--compile-engine` to compile the CUDA engine into a separate build directory first. The sidebar groups Chat, Train and Tools. Temporary chats remain in memory; Chat history expands a scrollable list and remembers its state. Right-click a saved conversation to rename or delete it.
+
 ### 1. Interactive Console (REPL)
 Run without any arguments to open the interactive REPL shell:
 ```bash
@@ -55,7 +72,7 @@ Run without any arguments to open the interactive REPL shell:
 Inside the console (`trance>`), you can run commands like:
 - `help`: show available console commands.
 - `status`: show details about the currently loaded model.
-- `load <path>`: load a model file (defaults to `models/trance1-stem-3b.bin`).
+- `load <path>`: load a model file.
 - `chat`: enter interactive multi-turn chat mode (`/exit` returns to the main menu).
 - `prompt "MESSAGE"`: send a single conversational prompt.
 - `generate "PROMPT"`: generate raw text completions.
@@ -67,57 +84,57 @@ Inside the console (`trance>`), you can run commands like:
 #### Training
 Train a model using a JSON configuration file:
 ```bash
-./trance train --config configs/trance1_stem_3b.json
+./trance train --config configs/trance1.2_30m.json
 ```
 
 #### Generation
 Generate text completions from a prompt:
 ```bash
-./trance generate --model models/trance1-stem-3b.bin --prompt "Explain a proton." --max-new-tokens 80 --temperature 0.8
+./trance generate --model models/trance1.1_21m.bin --prompt "Explain a proton." --max-new-tokens 80 --temperature 0.8
 ```
 
 #### Interactive Chat
 Launch directly into interactive chat mode with a model:
 ```bash
-./trance chat --model models/trance1-stem-3b.bin --temperature 0.7 --top-k 40 --top-p 0.9
+./trance chat --model models/trance1.1_21m.bin --temperature 0.7 --top-k 40 --top-p 0.9
 ```
 
 #### Model Evaluation
 Calculate validation loss on a dataset:
 ```bash
-./trance evaluate --model models/trance1-stem-3b.bin --data data/trance1/validation.txt
+./trance evaluate --model models/trance1.1_21m.bin --data data/trance12/validation.txt
 ```
 
 #### Inspect Model Metadata
 Display the parameter count, architecture configuration, and training steps:
 ```bash
-./trance inspect --model models/trance1-stem-3b.bin
+./trance inspect --model models/trance1.1_21m.bin
 ```
 
 ---
 
 ## Configuration File Format
 
-Training parameters are set with a standard JSON file (for example `configs/trance1_stem_3b.json`):
+Training parameters are set with a standard JSON file (for example `configs/trance1.2_30m.json`):
 
 ```json
 {
-  "vocab_size": 257,
-  "context_length": 32,
-  "embedding_dim": 48,
-  "layers": 2,
-  "attention_heads": 4,
-  "feed_forward_dim": 192,
-  "batch_size": 2,
-  "training_steps": 100,
-  "eval_interval": 20,
-  "checkpoint_interval": 50,
-  "learning_rate": 0.002,
+  "vocab_size": 1024,
+  "context_length": 1024,
+  "embedding_dim": 448,
+  "layers": 12,
+  "attention_heads": 8,
+  "feed_forward_dim": 1792,
+  "batch_size": 4,
+  "training_steps": 140000,
+  "eval_interval": 1000,
+  "checkpoint_interval": 10000,
+  "learning_rate": 0.0002,
   "gradient_clip": 1.0,
-  "seed": 42,
-  "train_data": "data/train.txt",
-  "validation_data": "data/valid.txt",
-  "output_model": "models/trance1-stem-3b.bin"
+  "seed": 4004,
+  "train_data": "data/trance12/train.txt",
+  "validation_data": "data/trance12/validation.txt",
+  "output_model": "models/trance1.2_30m.bin"
 }
 ```
 

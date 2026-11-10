@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+trance_app_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+export LD_LIBRARY_PATH="$trance_app_dir/_internal/cuda:$trance_app_dir/_internal${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$trance_app_dir/trance-llm" "$@"
