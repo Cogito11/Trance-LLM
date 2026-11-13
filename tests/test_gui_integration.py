@@ -71,7 +71,7 @@ class GuiIntegrationTests(unittest.TestCase):
 
     def test_stop_button_and_next_request(self):
         self.window.max_tokens.setValue(500);self.window.composer.setPlainText('Hi!');self.window._send_chat()
-        self.wait_for(lambda:self.window.engine._phase=='generating')
+        self.wait_for(lambda:self.window.engine.trance._phase=='generating')
         QTest.mouseClick(self.window.stop_button,Qt.MouseButton.LeftButton)
         self.wait_for(lambda:self.window.operation is None)
         self.assertEqual(self.window.current_chat['messages'][-1]['status'],'cancelled')

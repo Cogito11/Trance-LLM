@@ -44,6 +44,24 @@ def latest_run() -> Path | None:
     return (active or candidates)[0].parent if candidates else None
 
 
+def recent_runs(limit: int = 12) -> list[dict]:
+    """Newest-first run summaries for the sidebar; unreadable runs are skipped."""
+    found = []
+    paths = sorted((STATE / "runs").glob("*/status.json"), key=lambda p: p.parent.name, reverse=True)
+    for path in paths[:limit]:
+        try:
+            status = read_json(path, {}); config = read_json(path.parent / "config.json", {})
+        except (ValueError, OSError):
+            continue
+        recorded = status.get("status")
+        if run_alive(status): state = "running"
+        elif recorded in ("complete", "stopped", "failed"): state = recorded
+        elif recorded in ("running", "starting"): state = "failed"  # supervisor vanished
+        else: state = "unknown"
+        found.append({"dir": path.parent, "model": str(config.get("output_model", "")), "state": state})
+    return found
+
+
 def launch_training(config: dict) -> Path:
     validate_config(config)
     active = latest_run()

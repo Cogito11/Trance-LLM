@@ -50,7 +50,7 @@ This runs a set of numerical tests: gradient checks (finite-difference compariso
 
 ### Desktop GUI
 
-Trance LLM provides streaming chat, persistent local conversations, sequential model comparison, and a training dashboard with checkpointed stopping and resume. Setup and usage are described in [gui/README.md](gui/README.md).
+Trance LLM provides streaming chat, persistent local conversations, sequential model comparison, and a training dashboard with checkpointed stopping and resume. It can also chat with GGUF models through the llama.cpp runtime (an optional download from github.com; nothing else in the app uses the network). Setup and usage are described in [gui/README.md](gui/README.md).
 
 ```bash
 ./tools/setup_gui.sh
@@ -61,7 +61,7 @@ Rebuild `trance` from the current source first if your binary predates the deskt
 
 The portable Linux AppImage bundles Python, Qt, the native engine and cuBLAS. It uses your existing project folder for models, configs and data. See [packaging/README.md](packaging/README.md) for launch and build instructions.
 
-Rebuild and verify the AppImage with `./tools/build_release.sh`. Add `--compile-engine` to compile the CUDA engine into a separate build directory first. The sidebar groups Chat, Train and Tools. Temporary chats remain in memory; Chat history expands a scrollable list and remembers its state. Right-click a saved conversation to rename or delete it.
+Rebuild and verify the AppImage with `./tools/build_release.sh`. Add `--compile-engine` to compile the CUDA engine into a separate build directory first. The sidebar has a Chat / Train / Tools switcher, with the matching list below it. Temporary chats remain in memory; saved chats are listed in full and are searchable. Use the ⋯ button or right-click a saved conversation to rename or delete it.
 
 ### 1. Interactive Console (REPL)
 Run without any arguments to open the interactive REPL shell:

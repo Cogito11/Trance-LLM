@@ -76,7 +76,7 @@ class ConfigBuilder(QWidget):
         groups=(
             ("Model",("vocab_size","context_length","embedding_dim","layers","attention_heads","feed_forward_dim")),
             ("Training",("batch_size","training_steps","learning_rate","gradient_clip","eval_interval","checkpoint_interval","seed")),
-            ("Data & output",tuple(PATH_FIELDS)),
+            ("Data && output",tuple(PATH_FIELDS)),
         )
         for title,keys in groups:
             scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setObjectName("formScroll")

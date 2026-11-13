@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt,QUrl
+from .theme import COLORS as C
 from PySide6.QtGui import QDesktopServices,QColor,QPalette,QTextCursor,QTextCharFormat
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QLabel,QLineEdit,QTreeWidget,QTreeWidgetItem,QTextBrowser,QSplitter
 
@@ -33,7 +34,7 @@ class Documentation(QWidget):
         splitter=QSplitter();layout.addWidget(splitter,1)
         self.tree=QTreeWidget();self.tree.setHeaderHidden(True);self.tree.setMinimumWidth(230);splitter.addWidget(self.tree)
         self.reader=QTextBrowser();self.reader.setObjectName("articleReader");self.reader.setOpenLinks(False);self.reader.setOpenExternalLinks(False)
-        palette=self.reader.palette();palette.setColor(QPalette.ColorRole.Link,QColor("#63dacb"));self.reader.setPalette(palette)
+        palette=self.reader.palette();palette.setColor(QPalette.ColorRole.Link,QColor(C["accent"]));self.reader.setPalette(palette)
         self.reader.anchorClicked.connect(self._link);splitter.addWidget(self.reader);splitter.setStretchFactor(1,1);splitter.setSizes([260,710])
         self.footer=QLabel("Articles are available offline. External sources open only when you click their links.");self.footer.setObjectName("muted");self.footer.setWordWrap(True);layout.addWidget(self.footer)
         self.tree.currentItemChanged.connect(self._selected);self.search.textChanged.connect(self._filter);self._filter("")
@@ -73,8 +74,14 @@ class Documentation(QWidget):
             block=block.next()
         for position,length in links:
             cursor=QTextCursor(document);cursor.setPosition(position);cursor.setPosition(position+length,QTextCursor.MoveMode.KeepAnchor)
-            format=QTextCharFormat();format.setForeground(QColor("#63dacb"));cursor.mergeCharFormat(format)
+            format=QTextCharFormat();format.setForeground(QColor(C["accent"]));cursor.mergeCharFormat(format)
         self.reader.verticalScrollBar().setValue(0)
+
+    def restyle(self):
+        """Re-apply theme colors after a palette change."""
+        palette=self.reader.palette();palette.setColor(QPalette.ColorRole.Link,QColor(C["accent"]));self.reader.setPalette(palette)
+        item=self.tree.currentItem()
+        if item:self._selected(item)
 
     def open_article(self,article_id):
         if article_id not in self.by_id:return

@@ -1,6 +1,6 @@
 # Trance LLM
 
-A local PySide6 desktop app around the custom Trance CUDA engine. Verified on Linux with an RTX 4060. Chat, history and model comparison run locally; the app makes no network requests. Setup downloads Python packages and, when needed, project-local X11 runtime libraries.
+A local PySide6 desktop app around the custom Trance CUDA engine. Verified on Linux with an RTX 4060. Chat, history and model comparison run locally. The app makes no network requests on its own: the only built-in network use is the optional **Download** button for the llama.cpp runtime (see [GGUF models](#gguf-models-and-the-llamacpp-runtime)), which contacts github.com when you click it. Setup also downloads Python packages and, when needed, project-local X11 runtime libraries.
 
 ## Launch
 
@@ -26,9 +26,9 @@ On Windows, create a virtual environment, install `gui/requirements.txt`, build 
 
 ## Chat and comparison
 
-- The sidebar brand shows Trance with a teal LLM suffix. Chat headings switch between New Chat, Chat and Temporary Chat according to the active conversation. Export chat sits at the top right.
-- The model picker, Browse and Refresh float in a centered group below the chat header. Model architecture and step details appear in the picker's tooltip. An empty chat has a blank conversation area. Send message and Stop response sit inside the compact message box. It grows for wrapped or multiline text, scrolls for long messages, and shrinks again when cleared. The generation panel includes descriptions for every parameter.
-- The sidebar groups Chat (Temporary chat, New chat, Chat history), Train (Train, Configs), then Tools (Compare, Documentation). Chat history toggles a scrollable saved-conversation list. Its expanded state persists immediately, across page/chat changes and app restarts. Expanding the list keeps the current conversation; selecting a saved chat opens it.
+- The sidebar brand is two solid colors (the palette's primary and secondary accents). Chat headings switch between New Chat, Chat and Temporary Chat according to the active conversation. Export chat sits at the top right.
+- The model picker, Browse and Refresh float in a centered group below the chat header. Model architecture and step details appear in the picker's tooltip. A new empty chat shows a welcome message with four starter prompts (clicking one fills the composer so you can edit it before sending) and a reminder to choose a model; a temporary chat shows its own not-saved notice instead. Send message and Stop response sit inside the compact message box. It grows for wrapped or multiline text, scrolls for long messages, and shrinks again when cleared. The generation panel includes descriptions for every parameter.
+- The sidebar has a Chat / Train / Tools switcher at the top. Choosing a section opens the last page you used in it, and the list below a thin rule follows the section: Chat shows New chat, Temporary chat (a dashed outline button), a search box and the saved conversations (full height, scrolling); Train shows Train, Configs and Recent runs; Tools shows Compare, Documentation and Settings. Search matches titles and message text. Hover or select a chat to see a ⋯ button; it opens the same Rename/Delete menu as right-click. Opening an earlier training run from Recent runs is refused while another run is active. A status card at the bottom shows Engine idle / Ready / Generating… / Training · N% / Last request failed, with the GPU name beneath, and the Train tab shows a ● badge while a run is active.
 - Right-click a saved conversation to rename or delete it. These actions target the clicked conversation without switching away from a draft or temporary chat. Deleting the active conversation opens a neighboring saved conversation or a fresh unsaved draft if history is empty. Failed history writes preserve the previous conversation/title.
 - New chats stay as drafts until the first message is sent; empty drafts do not appear in history. Empty entries left by older releases are filtered on load and removed from the history file when it is next saved. Conversations with messages are preserved.
 - Temporary chats keep conversation context in memory and never enter the history file. The empty conversation area displays the centered notice "Chat Not Saved to History. Cleared when you switch chats or close the app." Sending a message replaces the notice with the conversation. Switching to another chat or closing the app discards it. Visiting Train or Compare retains the current temporary chat until you switch chats. Export chat is still available when you explicitly want to save a copy.
@@ -43,7 +43,7 @@ On Windows, create a virtual environment, install `gui/requirements.txt`, build 
 
 Training starts **only** when Start training is clicked. Preparing or viewing a config does not start a run. The Trance 1.2 config is selected by default.
 
-The training page validates supported settings, data paths, model architecture and output paths. An existing final model cannot be overwritten from the GUI. Resume requires an optimizer checkpoint with a matching architecture. Each run receives an immutable config snapshot under `data/gui/runs/<run>/`, along with `events.jsonl`, `status.json` and supervisor logs.
+The Train page opens with a run summary card (parameters, FP32 weight size, layers × width, context, steps and learning rate, plus whether data files are ready); **Edit JSON** reveals the raw configuration. The page validates supported settings, data paths, model architecture and output paths. An existing final model cannot be overwritten from the GUI. Resume requires an optimizer checkpoint with a matching architecture. Each run receives an immutable config snapshot under `data/gui/runs/<run>/`, along with `events.jsonl`, `status.json` and supervisor logs.
 
 A detached supervisor owns the training process. Closing the GUI leaves an authorized run running; reopening the app reconnects to it. Starting a run releases inference GPU memory, and chat/comparison are disabled while that run is active. The dashboard displays loss, steps, elapsed time, estimated remaining time and checkpoint paths. ETA begins after 25 completed steps; validation follows the config's eval interval.
 
@@ -106,3 +106,18 @@ To capture the app for layout inspection without starting inference or training:
 ```bash
 QT_QPA_PLATFORM=offscreen ./trance-gui --screenshot /tmp/trance-llm.png
 ```
+
+## GGUF models and the llama.cpp runtime
+
+Besides Trance `.bin` checkpoints, chat and comparison can use **GGUF** models, the format used by llama.cpp, LM Studio and Ollama. Trance checkpoints keep running on the built-in CUDA engine, which is also what trains models; GGUF models run through llama.cpp, the same engine LM Studio uses.
+
+- **Finding models.** GGUF files are listed automatically from `models/`, LM Studio's model folders and the Hugging Face cache. Use **Browse…** to add one from anywhere (it is remembered). Split models are listed once, and multimodal projector files are ignored.
+- **The runtime.** GGUF needs a `llama-server` program. Tools → Settings → Runtimes shows which one is in use. The app looks, in order, for: a path you chose, a runtime it downloaded, a bundled one, then `llama-server` on your PATH. If none is found, **Download** fetches a pinned llama.cpp build (CPU, Vulkan, CUDA 12 or 13, or Metal depending on your system; the recommended one is preselected). Files come from the official `ggml-org/llama.cpp` GitHub releases and are checked against SHA-256 hashes built into the app before they are unpacked. CUDA builds include their CUDA runtime, so they are several hundred MB.
+- **Privacy.** The only network use is that download, and only when you click it. Afterwards everything runs on your machine: the server listens on 127.0.0.1 only, on a random port, protected by a random per-launch API key, and it is stopped when you switch engines, start training, or close the app.
+- **Behavior notes.** One model is loaded at a time and stays loaded between messages. Starting training or switching to a Trance model frees the GPU first. Context is capped at 8,192 tokens (or the model's own limit if smaller). Sampling settings map to temperature, top-p, top-k, max tokens and seed; the server applies the model's own chat template. The context hint shows usage after each reply.
+- **AppImage note.** The AppImage puts its own library folders (bundled Qt, Python and cuBLAS) on `LD_LIBRARY_PATH`; the llama.cpp server is started without those entries so it loads its own libraries, while anything you had set yourself is kept.
+- **Maintenance.** `python tools/pin_llama_runtime.py` re-verifies the pinned hashes; with `--tag bNNNN --write` it moves the app to a newer llama.cpp build.
+
+## Settings and themes
+
+Tools → Settings lets you choose a color theme: Teal (default), Indigo or Amber. A theme changes only the accent colors; it applies immediately, including to open chats, and is saved in `data/gui/settings.json` as `theme`. An unknown saved value falls back to Teal. Palettes live in `gui/theme.py` (`PALETTES`); add an entry there and a card appears automatically on the Settings page.
