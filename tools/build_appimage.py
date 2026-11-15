@@ -20,10 +20,13 @@ sys.path.insert(0,str(ROOT))
 from gui import APP_NAME, APP_SLUG, APP_VERSION, APPIMAGE_NAME
 BUILD=ROOT/"build/packaging"
 DIST=ROOT/"dist"
+# Versioned releases only: the "continuous" builds are replaced upstream, which silently breaks the pinned hashes.
+TOOL_URL="https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage"
+RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64"
 TOOL=ROOT/"packaging/downloads/appimagetool-x86_64.AppImage"
-TOOL_SHA="95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6"
+TOOL_SHA="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
 RUNTIME=ROOT/"packaging/downloads/runtime-x86_64"
-RUNTIME_SHA="156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074"
+RUNTIME_SHA="2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"
 
 
 def sha(path):
@@ -31,6 +34,36 @@ def sha(path):
     with path.open("rb") as f:
         while b:=f.read(1024*1024): h.update(b)
     return h.hexdigest()
+
+
+def cublas_search_dirs(environ=None):
+    """Where the cuBLAS libraries may live: an explicit override, the CUDA toolkit, then the distro package location."""
+    env = os.environ if environ is None else environ
+    dirs = []
+    if env.get("TRANCE_CUBLAS_DIR"): dirs.append(Path(env["TRANCE_CUBLAS_DIR"]))
+    for root in (env.get("CUDA_PATH"), "/usr/local/cuda"):
+        if root: dirs += [Path(root)/"lib64", Path(root)/"targets/x86_64-linux/lib"]
+    dirs.append(Path("/lib/x86_64-linux-gnu"))
+    return dirs
+
+
+def find_cublas(name, environ=None):
+    for directory in cublas_search_dirs(environ):
+        if (directory/name).exists(): return directory/name
+    return None
+
+
+def find_cublas_licenses(environ=None):
+    """(file name, source) pairs for the license text that must ship with the redistributed cuBLAS libraries."""
+    env = os.environ if environ is None else environ
+    found = []
+    docs = Path(env.get("TRANCE_DOC_ROOT", "/usr/share/doc"))
+    for copyright in sorted(docs.glob("libcublas*/copyright")):
+        found.append((copyright.parent.name+"-copyright.txt", copyright))
+    for root in (env.get("CUDA_PATH"), "/usr/local/cuda"):
+        eula = Path(root)/"EULA.txt" if root else None
+        if eula and eula.is_file() and not any(n == "cuda-EULA.txt" for n, _ in found): found.append(("cuda-EULA.txt", eula))
+    return found
 
 
 def main():
@@ -52,8 +85,9 @@ def main():
     shutil.copy2(engine,staged_engine)
     copied={}
     for name in ("libcublas.so.12","libcublasLt.so.12"):
-        source=Path("/lib/x86_64-linux-gnu")/name
-        if not source.exists(): raise SystemExit(f"Missing CUDA runtime library: {source}")
+        source=find_cublas(name)
+        if source is None:
+            raise SystemExit(f"Missing CUDA runtime library {name}. Looked in: "+", ".join(map(str,cublas_search_dirs()))+". Set TRANCE_CUBLAS_DIR to the folder that holds it.")
         dest=cuda/name; shutil.copy2(source.resolve(),dest); copied[name]=sha(dest)
     args=[sys.executable,"-m","PyInstaller","--noconfirm","--clean","--onedir","--name",APP_SLUG,
           "--paths",str(ROOT),"--distpath",str(BUILD/"frozen"),"--workpath",str(BUILD/"pyinstaller"),
@@ -82,8 +116,10 @@ def main():
     if not cursor.exists(): cursor=Path("/lib/x86_64-linux-gnu/libxcb-cursor.so.0")
     if cursor.exists(): shutil.copy2(cursor.resolve(),appdir/"_internal/libxcb-cursor.so.0")
     licenses=appdir/"_internal/licenses"; licenses.mkdir(exist_ok=True)
-    for name in ("libcublas12","libcublaslt12"):
-        shutil.copy2(Path("/usr/share/doc")/name/"copyright",licenses/(name+"-copyright.txt"))
+    notices = find_cublas_licenses()
+    if not notices: raise SystemExit("Cannot find the license text for the cuBLAS libraries (a libcublas* copyright file or the CUDA toolkit EULA.txt); it must ship with them.")
+    for filename, source in notices:
+        shutil.copy2(source,licenses/filename)
     qt_license=Path(__import__("PySide6").__file__).parent/"Qt/licenses"
     if qt_license.is_dir(): shutil.copytree(qt_license,licenses/"Qt",dirs_exist_ok=True)
     for name,digest in copied.items():

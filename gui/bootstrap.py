@@ -8,6 +8,18 @@ from pathlib import Path
 import sys
 
 
+def appimage_project():
+    """The folder holding the AppImage, when configs/ and models/ sit beside it (a downloaded release).
+
+    This is what makes double-clicking the AppImage work with its sibling folders, wherever it was unpacked.
+    """
+    appimage=os.environ.get("APPIMAGE")
+    if not appimage: return None
+    folder=Path(appimage).resolve().parent
+    if (folder/"configs").is_dir() and (folder/"models").is_dir() and os.access(folder,os.W_OK): return folder
+    return None
+
+
 def main():
     parser=argparse.ArgumentParser(add_help=False)
     parser.add_argument("--project",type=Path)
@@ -19,6 +31,8 @@ def main():
     project=options.project
     if project is None and os.environ.get("TRANCE_PROJECT_DIR"):
         project=Path(os.environ["TRANCE_PROJECT_DIR"])
+    if project is None and frozen:
+        project=appimage_project()
     if project is None and frozen:
         # Only read settings until the user explicitly chooses a project.
         from PySide6.QtCore import QSettings

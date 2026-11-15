@@ -171,7 +171,13 @@ QPushButton#themeCard:hover {{ border-color: {border_hover}; background: {surfac
 QPushButton#themeCard:checked {{ border: 2px solid {accent}; background: {accent_wash}; }}
 QLabel#themeName {{ font-size: 15px; font-weight: 700; }}
 QFrame#settingsCard {{ background: {surface}; border: 1px solid {border_strong}; border-radius: 12px; }}
-QLabel#runtimeStatus {{ color: {text_subtle}; font-size: 12px; }}
+QFrame#runtimeRow {{ background: {control}; border: 1px solid {border}; border-radius: 10px; }}
+QLabel#rowName {{ font-weight: 600; }}
+QLabel#badge {{ background: {accent_wash}; color: {accent}; border-radius: 9px; padding: 2px 9px; font-size: 11px; font-weight: 600; }}
+QPushButton#thinkToggle {{ background: transparent; border: 1px solid {border_strong}; border-radius: 13px; padding: 5px 13px; color: {text_muted}; font-size: 12px; font-weight: 600; }}
+QPushButton#thinkToggle:hover {{ border-color: {border_hover}; color: {text}; background: transparent; }}
+QPushButton#thinkToggle:checked {{ border-color: {accent}; color: {accent}; background: {accent_wash}; }}
+QPushButton#thinkToggle:disabled {{ border-color: {border}; color: {text_disabled}; background: transparent; }}
 QFrame#segBar {{ background: {control}; border: 1px solid {border}; border-radius: 9px; }}
 QPushButton#seg {{ background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 7px 4px; color: {text_muted}; font-weight: 600; font-size: 12px; }}
 QPushButton#seg:hover {{ color: {text}; }}
@@ -187,6 +193,7 @@ QLineEdit#chatSearch {{ padding: 7px 10px; border-radius: 8px; font-size: 12px; 
 QListWidget#runList::item {{ padding: 8px 8px; }}
 QFrame#statusCard {{ background: {control}; border: 1px solid {border}; border-radius: 9px; }}
 QLabel#statusTitle {{ font-weight: 600; font-size: 12px; }}
+QLabel#statusModel {{ color: {text_subtle}; font-size: 11px; }}
 QLabel#statusDot {{ font-size: 11px; color: {text_disabled}; }}
 QLabel#statusDot[state="ok"] {{ color: {accent}; }}
 QLabel#statusDot[state="busy"] {{ color: {accent_2}; }}

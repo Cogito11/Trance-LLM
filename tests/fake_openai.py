@@ -50,6 +50,9 @@ class Handler(BaseHTTPRequestHandler):
         reason = "length" if endless or limit < len(self.pieces) else "stop"
         try:
             self._chunk('data: ' + json.dumps({"choices": [{"delta": {"role": "assistant", "content": None}}]}) + "\n\n")
+            if (body.get("chat_template_kwargs") or {}).get("enable_thinking"):
+                for part in ("Let me ", "think ", "about it."):
+                    self._chunk('data: ' + json.dumps({"choices": [{"delta": {"reasoning_content": part}}]}) + "\n\n")
             for n in range(count):
                 time.sleep(self.delay)
                 self._chunk('data: ' + json.dumps({"choices": [{"delta": {"content": self.pieces[n % len(self.pieces)]}}]}) + "\n\n")

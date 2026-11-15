@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gui.gguf import discover_gguf, read_gguf_info
+from gui.gguf import discover_gguf, read_chat_template, read_gguf_info, supports_thinking
 
 
 def _s(text: str) -> bytes:
@@ -71,6 +71,37 @@ class ReadTests(unittest.TestCase):
         for name in ("empty", "text", "trunc", "v1", "noarch", "proj"):
             with self.assertRaises(ValueError, msg=name): read_gguf_info(self.root / f"{name}.gguf")
         with self.assertRaises(ValueError): read_gguf_info(self.root / "missing.gguf")
+
+
+class ChatTemplateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_reads_a_template_that_sits_after_large_tokenizer_arrays(self):
+        template = "{% if enable_thinking %}<think>{% endif %}{{ messages }}"
+        path = write(self.root / "m.gguf", *chat_model(), kv_str_array("tokenizer.ggml.tokens", ["tok%d" % n for n in range(5000)]),
+                     kv_u32_array("tokenizer.ggml.token_type", list(range(5000))), kv_str("tokenizer.chat_template", template), kv_u32("tokenizer.ggml.eos_token_id", 2))
+        self.assertEqual(read_chat_template(path), template)
+
+    def test_a_model_without_a_template_gives_an_empty_string(self):
+        self.assertEqual(read_chat_template(write(self.root / "m.gguf", *chat_model())), "")
+
+    def test_unreadable_files_raise_value_error(self):
+        (self.root / "empty.gguf").write_bytes(b"")
+        (self.root / "text.gguf").write_text("not a model, just some words to make it long enough to read")
+        (self.root / "trunc.gguf").write_bytes(gguf_bytes(*chat_model(), kv_str("tokenizer.chat_template", "x" * 100))[:70])
+        for name in ("empty", "text", "trunc"):
+            with self.assertRaises(ValueError, msg=name): read_chat_template(self.root / f"{name}.gguf")
+        with self.assertRaises(ValueError): read_chat_template(self.root / "missing.gguf")
+
+    def test_thinking_support_is_recognised_from_the_template(self):
+        for yes in ("{% if enable_thinking %}x{% endif %}", "assistant: <think>\n", "{{ message.reasoning_content }}", "{{ reasoning_effort }}"):
+            self.assertTrue(supports_thinking(yes), yes)
+        for no in ("", "<start_of_turn>user\n{{ content }}<end_of_turn>", "[INST] {{ content }} [/INST]"):
+            self.assertFalse(supports_thinking(no), no)
 
 
 class DiscoveryTests(unittest.TestCase):

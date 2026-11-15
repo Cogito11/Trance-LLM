@@ -149,6 +149,28 @@ class RuntimeInfo:
         return names[self.source] + (f" ({extra})" if extra else "")
 
 
+@dataclass(frozen=True)
+class InstalledRuntime:
+    """One runtime the app can see, as shown in Settings."""
+    key: str             # "managed:<folder>", "custom", "bundled" or "path"
+    source: str
+    name: str
+    path: Path           # the llama-server program
+    folder: Path         # what "Open folder" shows
+    size_bytes: int = 0  # only measured for downloads
+    removable: bool = False
+    active: bool = False
+
+
+def folder_size(folder: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            try: total += os.lstat(os.path.join(root, name)).st_size
+            except OSError: pass
+    return total
+
+
 def find_server(directory: Path) -> Path | None:
     for root, _dirs, files in os.walk(directory):
         if SERVER_NAME in files:
@@ -344,10 +366,12 @@ class RuntimeManager(QObject):
     install_failed = Signal(str)
 
     def __init__(self, state_dir: Path, get_custom, set_custom, parent=None, *, flavors=None, tag=PINNED_TAG,
-                 base_url=RELEASE_BASE, bundled_dir: Path | None = None, path_lookup=shutil.which):
+                 base_url=RELEASE_BASE, bundled_dir: Path | None = None, path_lookup=shutil.which,
+                 get_active=lambda: "", set_active=lambda value: None):
         super().__init__(parent)
         self.root = Path(state_dir) / "runtimes" / "llama.cpp"
         self._get_custom, self._set_custom = get_custom, set_custom
+        self._get_active, self._set_active = get_active, set_active   # which download to prefer when several exist
         self.flavors = FLAVORS.get(current_platform(), []) if flavors is None else flavors
         self.tag, self.base_url = tag, base_url
         self.bundled_dir = Path(bundled_dir) if bundled_dir else BUNDLE / "llama.cpp"
@@ -356,17 +380,24 @@ class RuntimeManager(QObject):
         self._probe: _VersionThread | None = None
 
     # -- discovery
-    def _managed(self) -> RuntimeInfo | None:
-        best, newest = None, -1.0
+    def _downloads(self) -> list[tuple[Path, dict]]:
+        """Every valid download, newest first, as (folder, metadata)."""
+        found = []
         for meta_file in self.root.glob("*/runtime.json"):
             try:
                 meta = json.loads(meta_file.read_text(encoding="utf-8"))
-                binary = meta_file.parent / meta["binary"]
-                if binary.is_file() and meta["installed"] > newest:
-                    best, newest = RuntimeInfo(binary, "managed", meta.get("tag", ""), meta.get("flavor", "")), meta["installed"]
+                if (meta_file.parent / meta["binary"]).is_file() and isinstance(meta["installed"], (int, float)):
+                    found.append((meta_file.parent, meta))
             except (OSError, ValueError, KeyError, TypeError):
                 continue
-        return best
+        return sorted(found, key=lambda item: item[1]["installed"], reverse=True)
+
+    def _managed(self) -> RuntimeInfo | None:
+        downloads = self._downloads()
+        if not downloads: return None
+        chosen = next((d for d in downloads if d[0].name == self._get_active()), downloads[0])
+        folder, meta = chosen
+        return RuntimeInfo(folder / meta["binary"], "managed", meta.get("tag", ""), meta.get("flavor", ""))
 
     def resolve(self) -> RuntimeInfo | None:
         custom = self._get_custom()
@@ -386,6 +417,52 @@ class RuntimeManager(QObject):
     def _cached(path: Path) -> bool:
         try: return (str(path), path.stat().st_mtime) in _VERSION_CACHE
         except OSError: return False
+
+    def _flavor_label(self, flavor_id: str) -> str:
+        for catalog in (self.flavors, *FLAVORS.values()):
+            for flavor in catalog:
+                if flavor.id == flavor_id: return flavor.label
+        return flavor_id or "unknown"
+
+    def installed(self) -> list[InstalledRuntime]:
+        """Everything the resolver could use, with the one in use marked."""
+        active = self.resolve()
+        rows = []
+        for folder, meta in self._downloads():
+            binary = folder / meta["binary"]
+            rows.append(InstalledRuntime(f"managed:{folder.name}", "managed", f"llama.cpp {meta.get('tag', '')} \u00b7 {self._flavor_label(meta.get('flavor', ''))}",
+                                         binary, folder, folder_size(folder), True, bool(active and active.path == binary)))
+        custom = self._get_custom()
+        if custom and Path(custom).is_file():
+            path = Path(custom); version = probe_version(path) if self._cached(path) else ""
+            rows.append(InstalledRuntime("custom", "custom", "Your chosen llama-server" + (f" \u00b7 {version}" if version else ""),
+                                         path, path.parent, 0, False, bool(active and active.path == path)))
+        bundled = find_server(self.bundled_dir) if self.bundled_dir.is_dir() else None
+        if bundled:
+            rows.append(InstalledRuntime("bundled", "bundled", f"Bundled with the app \u00b7 {self.tag}", bundled, bundled.parent, 0, False,
+                                         bool(active and active.path == bundled)))
+        found = self._path_lookup("llama-server")
+        if found:
+            path = Path(found); version = probe_version(path) if self._cached(path) else ""
+            rows.append(InstalledRuntime("path", "path", "llama-server on your PATH" + (f" \u00b7 {version}" if version else ""),
+                                         path, path.parent, 0, False, bool(active and active.path == path)))
+        return rows
+
+    def use(self, key: str):
+        """Prefer a particular runtime: a download (also ends any custom-path override)."""
+        if key.startswith("managed:") and any(f.name == key[8:] for f, _ in self._downloads()):
+            self._set_active(key[8:])
+            if self._get_custom(): self._set_custom("")
+            self.refresh()
+
+    def remove_install(self, key: str):
+        """Delete one downloaded runtime (never anything outside the downloads folder)."""
+        if self.installing or not key.startswith("managed:"): return
+        folder = self.root / key[8:]
+        if folder.parent != self.root or not folder.is_dir(): return
+        shutil.rmtree(folder, ignore_errors=True)
+        if self._get_active() == key[8:]: self._set_active("")
+        self.refresh()
 
     def has_download(self) -> bool:
         return self._managed() is not None
@@ -421,10 +498,6 @@ class RuntimeManager(QObject):
     def clear_custom(self):
         self._set_custom(""); self.refresh()
 
-    def remove_managed(self):
-        if self.installing: return
-        shutil.rmtree(self.root, ignore_errors=True); self.refresh()
-
     def start_install(self, flavor_id: str):
         if self.installing: return
         flavor = next((f for f in self.flavors if f.id == flavor_id), None)
@@ -443,6 +516,7 @@ class RuntimeManager(QObject):
     def _installed(self, _dest):
         self._thread.wait(); self._thread = None
         if self._get_custom(): self._set_custom("")   # a fresh download is an explicit choice; stop preferring the old path
+        self._set_active(Path(_dest).name)           # and use what was just installed
         self.refresh()
 
     def _install_failed(self, message):

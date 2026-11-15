@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
                                QScrollArea, QVBoxLayout, QWidget)
 
@@ -34,19 +35,49 @@ class ThemeCard(QPushButton):
             child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
 
+class RuntimeRow(QFrame):
+    """One installed runtime: what it is, where it lives, and what you can do with it."""
+    open_requested = Signal(str)
+    use_requested = Signal(str)
+    remove_requested = Signal(str)
+
+    def __init__(self, entry, parent=None):
+        super().__init__(parent)
+        self.entry = entry
+        self.setObjectName("runtimeRow")
+        box = QHBoxLayout(self); box.setContentsMargins(14, 10, 12, 10); box.setSpacing(10)
+        text = QVBoxLayout(); text.setSpacing(2)
+        top = QHBoxLayout(); top.setSpacing(8)
+        self.name_label = QLabel(entry.name); self.name_label.setObjectName("rowName"); top.addWidget(self.name_label)
+        self.badge = QLabel("In use"); self.badge.setObjectName("badge"); self.badge.setVisible(entry.active); top.addWidget(self.badge)
+        top.addStretch(1); text.addLayout(top)
+        size = f"  \u00b7  {entry.size_bytes / 1e6:,.0f} MB" if entry.size_bytes else ""
+        self.path_label = QLabel(str(entry.path) + size); self.path_label.setObjectName("muted"); self.path_label.setWordWrap(True)
+        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); self.path_label.setToolTip(str(entry.path))
+        text.addWidget(self.path_label); box.addLayout(text, 1)
+        self.use_button = QPushButton("Use"); self.open_button = QPushButton("Open folder")
+        self.remove_button = QPushButton("Remove" if entry.removable else "Stop using")
+        for b in (self.use_button, self.open_button, self.remove_button):
+            b.setProperty("compact", True); box.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
+        self.use_button.setVisible(entry.source == "managed" and not entry.active)
+        self.remove_button.setVisible(entry.removable or entry.source == "custom")
+        self.use_button.clicked.connect(lambda: self.use_requested.emit(entry.key))
+        self.open_button.clicked.connect(lambda: self.open_requested.emit(str(entry.folder)))
+        self.remove_button.clicked.connect(lambda: self.remove_requested.emit(entry.key))
+
+
 class RuntimeCard(QFrame):
-    """Shows which llama.cpp runtime is in use and lets the user download or choose one."""
+    """Download a llama.cpp runtime, and see and manage every runtime the app can use."""
 
     def __init__(self, manager, parent=None):
         super().__init__(parent)
         self.manager = manager
+        self.rows: dict = {}
         self.setObjectName("settingsCard")
         box = QVBoxLayout(self); box.setContentsMargins(18, 16, 18, 16); box.setSpacing(10)
         title = QLabel("llama.cpp runtime"); title.setObjectName("themeName"); box.addWidget(title)
         blurb = QLabel("Runs GGUF models with the same engine LM Studio uses. Trance models run on the built-in CUDA engine and do not need this.")
         blurb.setObjectName("muted"); blurb.setWordWrap(True); box.addWidget(blurb)
-        self.status = QLabel(); self.status.setObjectName("runtimeStatus"); self.status.setWordWrap(True)
-        self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); box.addWidget(self.status)
         row = QHBoxLayout(); row.setSpacing(8)
         self.flavor = QComboBox(); row.addWidget(self.flavor, 1)
         self.install_button = QPushButton("Download"); self.install_button.setObjectName("primary"); row.addWidget(self.install_button)
@@ -55,16 +86,18 @@ class RuntimeCard(QFrame):
         self.progress = QProgressBar(); self.progress.setVisible(False); box.addWidget(self.progress)
         self.error = QLabel(); self.error.setObjectName("configHint"); self.error.setProperty("bad", True); self.error.setWordWrap(True)
         self.error.setVisible(False); box.addWidget(self.error)
-        row2 = QHBoxLayout(); row2.setSpacing(8)
-        self.choose_button = QPushButton("Choose existing\u2026"); self.remove_button = QPushButton("Remove download")
-        row2.addWidget(self.choose_button); row2.addWidget(self.remove_button); row2.addStretch(1); box.addLayout(row2)
+        header = QHBoxLayout(); header.setSpacing(8)
+        heading = QLabel("INSTALLED"); heading.setObjectName("eyebrow"); header.addWidget(heading); header.addStretch(1)
+        self.choose_button = QPushButton("Choose existing\u2026"); self.choose_button.setProperty("compact", True); header.addWidget(self.choose_button)
+        box.addSpacing(6); box.addLayout(header)
+        self.list_box = QVBoxLayout(); self.list_box.setSpacing(8); box.addLayout(self.list_box)
+        self.empty = QLabel(); self.empty.setObjectName("muted"); self.empty.setWordWrap(True); box.addWidget(self.empty)
         note = QLabel("Downloading contacts github.com. Nothing else in this app uses the network. Files are checked against "
                       "SHA-256 hashes built into the app before they are unpacked.")
         note.setObjectName("muted"); note.setWordWrap(True); box.addWidget(note)
         self.flavor.currentIndexChanged.connect(self._flavor_changed)
         self.install_button.clicked.connect(self._install_clicked)
         self.choose_button.clicked.connect(self._choose)
-        self.remove_button.clicked.connect(self._remove)
         manager.changed.connect(self.refresh); manager.progress.connect(self._progress); manager.install_failed.connect(self._failed)
         for flavor in manager.flavors:
             self.flavor.addItem(f"{flavor.label}  \u00b7  ~{flavor.approx_mb} MB", flavor.id)
@@ -79,18 +112,26 @@ class RuntimeCard(QFrame):
 
     def refresh(self):
         installing = self.manager.installing
-        self.status.setText(self.manager.status())
         self.install_button.setText("Cancel" if installing else "Download")
         self.install_button.setEnabled(bool(self.manager.flavors))
         self.flavor.setEnabled(not installing and bool(self.manager.flavors))
         self.choose_button.setEnabled(not installing)
-        custom = bool(self.manager.custom_path())
-        self.remove_button.setVisible(custom or self.manager.has_download())
-        self.remove_button.setText("Stop using this path" if custom else "Remove download")
-        self.remove_button.setEnabled(not installing)
         self.progress.setVisible(installing)
         if installing: self.error.setVisible(False)
         self._flavor_changed()
+        while self.list_box.count():
+            item = self.list_box.takeAt(0)
+            if item.widget() is not None: item.widget().setParent(None)
+        self.rows = {}
+        entries = self.manager.installed()
+        for entry in entries:
+            widget = RuntimeRow(entry)
+            widget.open_requested.connect(self._open); widget.use_requested.connect(self.manager.use)
+            widget.remove_requested.connect(self._remove); widget.setEnabled(not installing)
+            self.list_box.addWidget(widget); self.rows[entry.key] = widget
+        self.empty.setVisible(not entries)
+        self.empty.setText("Nothing installed yet. GGUF models need a llama.cpp runtime: download one above or choose a llama-server you already have."
+                           if self.manager.flavors else "No prebuilt runtime is available for this system. Choose a llama-server you already have.")
 
     def _install_clicked(self):
         if self.manager.installing: self.manager.cancel_install(); return
@@ -112,9 +153,12 @@ class RuntimeCard(QFrame):
         path, _ = QFileDialog.getOpenFileName(self, "Choose llama-server", str(Path.home()), "")
         if path: self.manager.set_custom(path)
 
-    def _remove(self):
-        if self.manager.custom_path(): self.manager.clear_custom()
-        else: self.manager.remove_managed()
+    def _open(self, folder):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def _remove(self, key):
+        if key == "custom": self.manager.clear_custom()
+        else: self.manager.remove_install(key)
 
 
 class SettingsPage(QWidget):

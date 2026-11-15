@@ -60,12 +60,14 @@ class _HealthWaiter(QThread):
 
 class LlamaServerBackend(QObject):
     delta = Signal(str)
+    thinking = Signal(str)
     started = Signal(dict)
     finished = Signal(dict)
     failed = Signal(str)
     state_changed = Signal(str)
     ready = Signal(str)
     loaded = Signal(dict)
+    unloaded = Signal()
 
     def __init__(self, resolver, parent=None, *, context_cap: int = 8192, load_timeout: float = 900):
         super().__init__(parent)
@@ -138,7 +140,7 @@ class LlamaServerBackend(QObject):
 
     def _start_server(self, info, model: str):
         self._stop_process()
-        self._port, self._token = free_port(), secrets.token_urlsafe(18)
+        self._port, self._token = free_port(), secrets.token_hex(16)   # hex only: a key starting with '-' would be parsed as an option
         self._context = self._context_for(model)
         args = ["-m", model, "--host", "127.0.0.1", "--port", str(self._port), "--api-key", self._token,
                 "-c", str(self._context), "-np", "1", "--no-webui"]
@@ -177,6 +179,7 @@ class LlamaServerBackend(QObject):
                             {"Authorization": f"Bearer {self._token}"}, parent=self)
         stream.started_stream.connect(self._stream_started)
         stream.delta.connect(self.delta)
+        stream.thinking.connect(self.thinking)
         stream.done.connect(self._stream_done)
         stream.failed.connect(self._stream_failed)
         self._stream = stream
@@ -230,7 +233,8 @@ class LlamaServerBackend(QObject):
 
     def _exited(self, code, status):
         if self._stopping: return
-        self._model = ""
+        had_model, self._model = bool(self._model), ""
+        if had_model: self.unloaded.emit()      # the server died on its own; the model is gone
         if self._waiter is not None: self._waiter.cancel()
         if self.busy and self._phase == "loading" and not self._cancelled:
             self._fail(self._server_message(f"llama-server could not load this model (exit {code})."))

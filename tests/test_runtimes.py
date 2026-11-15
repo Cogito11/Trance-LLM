@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import io
 import os
-import re
 import sys
 import tarfile
 import tempfile
@@ -20,7 +19,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 
 from gui import runtimes
-from gui.runtimes import (FLAVORS, PINNED_TAG, SERVER_NAME, Asset, Flavor, InstallError, RuntimeManager, find_server,
+from gui.runtimes import (FLAVORS, PINNED_TAG, SERVER_NAME, Asset, Flavor, InstallError, RuntimeManager,
                           probe_version, recommend, safe_extract)
 
 FAKE_SERVER = Path(__file__).resolve().parent / "fake_llama_server.py"
@@ -159,10 +158,12 @@ class InstallAndResolveTests(unittest.TestCase):
         self.flavor = Flavor("cpu", "CPU", "detail", (Asset("runtime.tar.gz", sha("runtime.tar.gz")), Asset("extra.tar.gz", sha("extra.tar.gz"))), 1)
         self.files = FileServer(self.root / "www")
         self.custom = {"path": ""}
+        self.active = {"name": ""}
         self.found_on_path = {"path": None}
         self.manager = RuntimeManager(self.root / "state", lambda: self.custom["path"], lambda v: self.custom.__setitem__("path", v),
                                       flavors=[self.flavor], tag="bTEST", base_url=self.files.url, bundled_dir=self.root / "bundled",
-                                      path_lookup=lambda name: self.found_on_path["path"])
+                                      path_lookup=lambda name: self.found_on_path["path"],
+                                      get_active=lambda: self.active["name"], set_active=lambda v: self.active.__setitem__("name", v))
         self.failures, self.progress = [], []
         self.manager.install_failed.connect(self.failures.append)
         self.manager.progress.connect(lambda *a: self.progress.append(a))
@@ -228,8 +229,63 @@ class InstallAndResolveTests(unittest.TestCase):
         self.assertEqual(self.custom["path"], str(mine))
         self.manager.clear_custom()
         self.assertEqual(self.manager.resolve().source, "managed")
-        self.manager.remove_managed()
+        key = next(r.key for r in self.manager.installed() if r.source == "managed")
+        self.manager.remove_install(key)
         self.assertEqual(self.manager.resolve().source, "bundled")
+
+    def second_install(self):
+        self.manager.flavors = [self.flavor, Flavor("vulkan", "Vulkan", "d", self.flavor.assets, 1)]
+        self.install()
+        self.manager.start_install("vulkan")
+        self.assertTrue(pump(self.app, lambda: not self.manager.installing))
+        self.app.processEvents()
+
+    def test_installed_lists_every_runtime_with_name_path_size_and_the_one_in_use(self):
+        self.assertEqual(self.manager.installed(), [])
+        self.install()
+        (row,) = self.manager.installed()
+        self.assertEqual((row.source, row.name, row.removable, row.active), ("managed", "llama.cpp bTEST \u00b7 CPU", True, True))
+        self.assertEqual(row.path, self.manager.resolve().path)
+        self.assertEqual(row.folder, row.path.parent)
+        self.assertGreater(row.size_bytes, 0)
+        mine = self.root / "mine"; mine.write_bytes(b"#!/bin/sh\n"); mine.chmod(0o755)
+        self.found_on_path["path"] = str(mine)
+        bundled = self.root / "bundled"; bundled.mkdir(); (bundled / SERVER_NAME).write_bytes(b"x")
+        rows = {r.source: r for r in self.manager.installed()}
+        self.assertEqual(set(rows), {"managed", "bundled", "path"})
+        self.assertTrue(rows["managed"].active); self.assertFalse(rows["bundled"].active or rows["path"].active)
+        self.assertFalse(rows["bundled"].removable or rows["path"].removable)
+        self.manager.set_custom(str(mine))
+        rows = {r.source: r for r in self.manager.installed()}
+        self.assertTrue(rows["custom"].active); self.assertFalse(rows["managed"].active)   # a chosen path overrides downloads
+
+    def test_several_downloads_can_coexist_and_one_can_be_chosen(self):
+        self.second_install()
+        rows = self.manager.installed()
+        self.assertEqual([r.name for r in rows], ["llama.cpp bTEST \u00b7 Vulkan", "llama.cpp bTEST \u00b7 CPU"])   # newest first
+        self.assertEqual([r.active for r in rows], [True, False])        # a fresh download becomes the one in use
+        self.manager.use("managed:bTEST-cpu")
+        self.assertEqual(self.manager.resolve().flavor, "cpu")
+        self.assertEqual([r.active for r in self.manager.installed()], [False, True])
+        self.assertEqual(self.active["name"], "bTEST-cpu")
+        mine = self.root / "mine"; mine.write_bytes(b"#!/bin/sh\n"); mine.chmod(0o755)
+        self.manager.set_custom(str(mine))
+        self.manager.use("managed:bTEST-vulkan")                         # choosing a download ends the custom override
+        self.assertEqual(self.custom["path"], "")
+        self.assertEqual(self.manager.resolve().flavor, "vulkan")
+        self.manager.use("managed:does-not-exist")                       # unknown keys are ignored
+        self.assertEqual(self.manager.resolve().flavor, "vulkan")
+
+    def test_removing_one_download_keeps_the_others_and_refuses_anything_else(self):
+        self.second_install()
+        self.manager.remove_install("managed:bTEST-vulkan")
+        self.assertEqual([r.name for r in self.manager.installed()], ["llama.cpp bTEST \u00b7 CPU"])
+        self.assertEqual(self.active["name"], "", "removing the chosen download clears the choice")
+        outside = self.root / "precious"; outside.mkdir(); (outside / "file").write_text("keep")
+        for bad in ("managed:../../precious", "managed:", "custom", "path", "bundled"):
+            self.manager.remove_install(bad)
+        self.assertTrue((outside / "file").exists())
+        self.assertEqual(len(self.manager.installed()), 1)
 
     def test_a_missing_custom_path_is_ignored(self):
         self.custom["path"] = str(self.root / "gone")

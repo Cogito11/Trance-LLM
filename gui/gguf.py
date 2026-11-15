@@ -6,6 +6,7 @@ come after the general and architecture keys in files written by llama.cpp.
 """
 from __future__ import annotations
 
+import mmap
 import os
 import re
 import struct
@@ -86,6 +87,54 @@ def read_gguf_info(path: Path) -> dict:
             "architecture": architecture, "context_length": int(meta.get(f"{architecture}.context_length") or 0),
             "quantization": FILE_TYPES.get(meta.get("general.file_type")), "size_label": meta.get("general.size_label"),
             "size_bytes": path.stat().st_size, "parameters": 0}
+
+
+def _skip(m, pos: int, kind: int) -> int:
+    """Offset just past a value of ``kind`` starting at ``pos`` (memory-mapped, so big tokenizer arrays are cheap)."""
+    if kind in _SCALARS:
+        return pos + struct.calcsize(_SCALARS[kind])
+    if kind == _STRING:
+        return pos + 8 + struct.unpack_from("<Q", m, pos)[0]
+    if kind == _ARRAY:
+        inner, count = struct.unpack_from("<IQ", m, pos); pos += 12
+        if inner in _SCALARS:
+            return pos + count * struct.calcsize(_SCALARS[inner])
+        if inner == _STRING:
+            for _ in range(count):
+                pos += 8 + struct.unpack_from("<Q", m, pos)[0]
+            return pos
+    raise ValueError("Unsupported GGUF value type")
+
+
+def read_chat_template(path: Path) -> str:
+    """The model's Jinja chat template, or "" if it has none. Raises ValueError for unreadable files."""
+    try:
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            if m[:4] != MAGIC:
+                raise ValueError("Not a GGUF file")
+            version, _tensors, count = struct.unpack_from("<IQQ", m, 4)
+            if version not in (2, 3) or count > 100_000:
+                raise ValueError(f"Unsupported GGUF version {version}")
+            pos = 24
+            for _ in range(count):
+                length = struct.unpack_from("<Q", m, pos)[0]
+                key = bytes(m[pos + 8:pos + 8 + length]).decode("utf-8", "replace"); pos += 8 + length
+                kind = struct.unpack_from("<I", m, pos)[0]; pos += 4
+                if key == "tokenizer.chat_template" and kind == _STRING:
+                    size = struct.unpack_from("<Q", m, pos)[0]
+                    return bytes(m[pos + 8:pos + 8 + size]).decode("utf-8", "replace")
+                pos = _skip(m, pos, kind)
+    except (OSError, struct.error) as error:
+        raise ValueError(f"Cannot read GGUF file: {error}") from error
+    return ""
+
+
+_THINKING_MARKERS = ("enable_thinking", "<think>", "reasoning_content", "reasoning_effort")
+
+
+def supports_thinking(template: str) -> bool:
+    """Whether a chat template has a thinking mode (it mentions the switch, or emits think tags)."""
+    return any(marker in template for marker in _THINKING_MARKERS)
 
 
 def default_model_folders() -> list[Path]:

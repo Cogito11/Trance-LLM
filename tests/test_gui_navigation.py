@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, sentinel
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, QUrl
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -422,9 +422,8 @@ class ChatNavigationTests(unittest.TestCase):
             self.window._browse_model()                                   # unreadable files only produce a message
         self.assertIn("GGUF",self.window.statusBar().currentMessage()+"GGUF")
 
-    def test_runtime_card_reflects_the_manager_and_drives_it(self):
+    def test_runtime_card_downloads_and_cancels_through_the_manager(self):
         w=self.window;card=w.settings_page.runtime_card;manager=w.runtimes
-        self.assertIn("Not installed",card.status.text().replace("Not installed","Not installed")) if manager.resolve() is None else None
         self.assertEqual(card.flavor.count(),len(manager.flavors))
         self.assertIn("(recommended)",card.flavor.itemText(card.flavor.currentIndex()))
         self.assertTrue(card.flavor_detail.text())
@@ -440,17 +439,50 @@ class ChatNavigationTests(unittest.TestCase):
         card._progress(5_000_000,20_000_000,"Downloading 1/2");self.assertEqual((card.progress.value(),card.progress.maximum()),(5_000_000,20_000_000))
         self.assertIn("5 / 20 MB",card.progress.format())
 
-    def test_choosing_an_existing_llama_server_is_saved_and_can_be_cleared(self):
-        w=self.window;card=w.settings_page.runtime_card
+    def fake_download(self,flavor,tag="bTEST",installed=1.0):
+        folder=self.state/"runtimes"/"llama.cpp"/f"{tag}-{flavor}";folder.mkdir(parents=True)
+        (folder/"llama-server").write_bytes(b"#!/bin/sh\n"+b"x"*2_000_000);(folder/"llama-server").chmod(0o755)
+        (folder/"runtime.json").write_text(json.dumps({"tag":tag,"flavor":flavor,"binary":"llama-server","installed":installed}))
+        return folder
+
+    def test_installed_runtimes_are_listed_with_name_path_and_actions(self):
+        w=self.window;card=w.settings_page.runtime_card;manager=w.runtimes
+        manager._path_lookup=lambda name:None
+        manager.refresh()
+        self.assertEqual(card.rows,{});self.assertTrue(card.empty.isVisibleTo(card));self.assertIn("Nothing installed",card.empty.text())
+        cpu=self.fake_download("cpu",installed=1.0);vulkan=self.fake_download("vulkan",installed=2.0)
+        manager.refresh()
+        self.assertFalse(card.empty.isVisibleTo(card))
+        self.assertEqual(list(card.rows),["managed:bTEST-vulkan","managed:bTEST-cpu"])
+        newest,older=card.rows["managed:bTEST-vulkan"],card.rows["managed:bTEST-cpu"]
+        self.assertIn("Vulkan",newest.name_label.text());self.assertIn("bTEST",newest.name_label.text())
+        self.assertIn(str(vulkan/"llama-server"),newest.path_label.text());self.assertIn("2 MB",newest.path_label.text())
+        self.assertTrue(newest.badge.isVisibleTo(newest));self.assertFalse(older.badge.isVisibleTo(older))
+        self.assertFalse(newest.use_button.isVisibleTo(newest));self.assertTrue(older.use_button.isVisibleTo(older))
+        self.assertEqual((newest.remove_button.text(),newest.remove_button.isVisibleTo(newest)),("Remove",True))
+        with patch("gui.settings.QDesktopServices.openUrl") as opened:
+            QTest.mouseClick(older.open_button,Qt.MouseButton.LeftButton)
+            self.assertEqual(opened.call_args.args[0].toLocalFile(),str(cpu))
+        QTest.mouseClick(older.use_button,Qt.MouseButton.LeftButton)
+        self.assertEqual(read_json(self.state/"settings.json")["llama_runtime"],"bTEST-cpu")
+        self.assertTrue(card.rows["managed:bTEST-cpu"].badge.isVisibleTo(card))
+        self.assertFalse(card.rows["managed:bTEST-vulkan"].badge.isVisibleTo(card))
+        QTest.mouseClick(card.rows["managed:bTEST-vulkan"].remove_button,Qt.MouseButton.LeftButton)
+        self.assertFalse(vulkan.exists());self.assertTrue(cpu.exists())
+        self.assertEqual(list(card.rows),["managed:bTEST-cpu"])
+
+    def test_choosing_an_existing_llama_server_adds_a_row_that_can_be_dropped(self):
+        w=self.window;card=w.settings_page.runtime_card;w.runtimes._path_lookup=lambda name:None
         binary=self.state/"my-llama-server";binary.write_bytes(b"#!/bin/sh\n");binary.chmod(0o755)
         with patch("gui.settings.QFileDialog.getOpenFileName",return_value=(str(binary),"")):
             QTest.mouseClick(card.choose_button,Qt.MouseButton.LeftButton)
         self.assertEqual(read_json(self.state/"settings.json")["llama_server_path"],str(binary))
-        self.assertIn("Your chosen llama-server",card.status.text())
-        self.assertTrue(card.remove_button.isVisibleTo(card));self.assertEqual(card.remove_button.text(),"Stop using this path")
-        QTest.mouseClick(card.remove_button,Qt.MouseButton.LeftButton)
+        row=card.rows["custom"]
+        self.assertIn("Your chosen llama-server",row.name_label.text());self.assertIn(str(binary),row.path_label.text())
+        self.assertTrue(row.badge.isVisibleTo(row));self.assertEqual(row.remove_button.text(),"Stop using")
+        QTest.mouseClick(row.remove_button,Qt.MouseButton.LeftButton)
         self.assertEqual(read_json(self.state/"settings.json")["llama_server_path"],"")
-        self.assertNotIn("Your chosen llama-server",card.status.text())
+        self.assertNotIn("custom",card.rows);self.assertTrue(binary.exists(),"stopping use never deletes the user's file")
 
     def test_other_backends_without_trance_fields_do_not_break_the_message_flow(self):
         w=self.window
@@ -463,11 +495,170 @@ class ChatNavigationTests(unittest.TestCase):
         self.assertEqual((message["content"],message["status"],message["prompt_tokens"]),("Hi there","complete",7))
         self.assertEqual(w.chat_hint.text(),"Context: 9/2,048 tokens")
 
+    def test_max_tokens_defaults_to_no_limit_for_gguf_and_remembers_each_kind(self):
+        w=self.window;info=self.gguf_info("Chatty",ctx=4096)
+        self.assertEqual(w.max_tokens.value(),160)                              # a Trance-style model keeps a modest cap
+        w.max_tokens.setValue(300)
+        with patch("gui.app.discover_gguf",return_value=[info]): w.refresh_models()
+        w.model_combo.setCurrentIndex(w.model_combo.findData(info["path"]))
+        self.assertEqual((w.max_tokens.value(),w.max_tokens.text(),w.max_tokens.maximum()),(0,"No limit",4095))
+        w.max_tokens.setValue(2000)
+        w.model_combo.setCurrentIndex(0)
+        self.assertEqual((w.max_tokens.value(),w.max_tokens.maximum()),(300,1023))
+        w.model_combo.setCurrentIndex(w.model_combo.findData(info["path"]))
+        self.assertEqual(w.max_tokens.value(),2000)
+        w._save_preferences()
+        saved=read_json(self.state/"settings.json");self.assertEqual((saved["max_new_tokens"],saved["max_new_tokens_gguf"]),(300,2000))
+        w.close()
+        reopened=MainWindow(state_dir=self.state,binary=Path("/unused-cpu-test-engine"));reopened.timer.stop()
+        try: self.assertEqual((reopened._max_values["trance"],reopened._max_values["gguf"]),(300,2000))
+        finally: reopened.close()
+
+    def test_no_limit_lets_gguf_models_finish_and_gives_trance_half_its_window(self):
+        w=self.window;info=self.gguf_info("Chatty",ctx=4096)
+        w.models.append({"path":"/m/t.bin","context_length":1024,"parameters":1,"step":1})
+        w.max_tokens.setValue(0)
+        self.assertEqual(w._generation_settings(info["path"])["max_new_tokens"],0)    # omitted from the request: the model decides
+        self.assertEqual(w._generation_settings("/m/t.bin")["max_new_tokens"],512)
+        self.assertEqual(w._generation_settings("/m/unknown.bin")["max_new_tokens"],512)
+        w.max_tokens.setValue(200)
+        self.assertEqual(w._generation_settings("/m/t.bin")["max_new_tokens"],200)
+
+    def test_cutoff_notes_say_whether_the_limit_or_the_context_window_ended_the_reply(self):
+        w=self.window
+        for limit,expected in ((160,"response limit reached"),(0,"context window full")):
+            w.operation="chat"
+            w.current_chat["messages"]=[{"role":"user","content":"hi"},{"role":"assistant","content":"partial","status":"generating","token_limit":limit}]
+            w._finished({"reason":"length","generated_tokens":5,"elapsed_seconds":1.0})
+            self.assertTrue(w.current_chat["messages"][-1]["note"].endswith(expected),w.current_chat["messages"][-1]["note"])
+
+    def test_requests_record_the_limit_they_were_sent_with(self):
+        w=self.window
+        with patch.object(w.engine,"generate") as generate:
+            w.max_tokens.setValue(0);w.composer.setPlainText("hello");w.model_combo.setCurrentIndex(0);w._send_chat()
+        self.assertEqual(generate.call_args.args[2]["max_new_tokens"],512)           # the mock Trance model has no known window -> default 1024 // 2
+        self.assertEqual(w.current_chat["messages"][-1]["token_limit"],512)
+
+    def thinking_model(self,name,template):
+        from gui.gguf import read_gguf_info
+        path=write_gguf(self.state/"models"/f"{name}.gguf",*chat_model(name,"llama",4096,15),
+                        __import__("test_gguf").kv_str("tokenizer.chat_template",template))
+        return read_gguf_info(path)
+
+    def test_the_think_toggle_sits_bottom_left_with_the_hint_to_its_right(self):
+        w=self.window
+        self.assertEqual(w.think_button.text(),"Think");self.assertTrue(w.think_button.isCheckable())
+        left=lambda widget:widget.mapTo(w,widget.rect().topLeft()).x()
+        self.assertLess(left(w.think_button),left(w.chat_hint))
+        self.assertLess(left(w.chat_hint),left(w.send_button))
+        self.assertEqual(w.think_button.mapTo(w,w.think_button.rect().center()).y()//12,w.chat_hint.mapTo(w,w.chat_hint.rect().center()).y()//12)
+
+    def test_think_is_only_available_for_models_that_can_think_and_is_remembered(self):
+        w=self.window
+        thinker=self.thinking_model("Thinker","{% if enable_thinking %}<think>{% endif %}")
+        plain=self.thinking_model("Plain","<start_of_turn>user\n{{ content }}")
+        with patch("gui.app.discover_gguf",return_value=[thinker,plain]): w.refresh_models()
+        pick=lambda info:w.model_combo.setCurrentIndex(w.model_combo.findData(info["path"]))
+        w.model_combo.setCurrentIndex(0)                                             # "Choose a model…"
+        self.assertFalse(w.think_button.isEnabled());self.assertIn("Choose a model",w.think_button.toolTip())
+        pick(plain);self.assertFalse(w.think_button.isEnabled());self.assertIn("does not have a thinking mode",w.think_button.toolTip())
+        pick(thinker);self.assertTrue(w.think_button.isEnabled())
+        w.model_combo.clear();w.model_combo.addItem("A Trance model","/m/trance.bin")
+        self.assertFalse(w.think_button.isEnabled());self.assertIn("Trance models",w.think_button.toolTip())
+        w.model_combo.clear();w.model_combo.addItem("Thinker",thinker["path"]);w.think_button.setChecked(True)
+        self.assertEqual(read_json(self.state/"settings.json")["thinking"],True)
+        w.close()
+        reopened=MainWindow(state_dir=self.state,binary=Path("/unused-cpu-test-engine"));reopened.timer.stop()
+        try: self.assertTrue(reopened.think_button.isChecked())
+        finally: reopened.close()
+
+    def test_the_thinking_switch_is_only_sent_to_models_that_have_one(self):
+        w=self.window
+        thinker=self.thinking_model("Thinker","{% if enable_thinking %}x{% endif %}")
+        plain=self.thinking_model("Plain","{{ content }}")
+        with patch("gui.app.discover_gguf",return_value=[thinker,plain]): w.refresh_models()
+        w.think_button.setEnabled(True);w.think_button.setChecked(True)
+        self.assertIs(w._generation_settings(thinker["path"])["thinking"],True)
+        w.think_button.setChecked(False)
+        self.assertIs(w._generation_settings(thinker["path"])["thinking"],False)   # explicitly off, so the model does not think on its own
+        self.assertNotIn("thinking",w._generation_settings(plain["path"]))
+        self.assertNotIn("thinking",w._generation_settings("/m/trance.bin"))
+        stamp=Path(thinker["path"]).stat().st_mtime
+        with patch("gui.app.read_chat_template",side_effect=AssertionError("should be cached")):
+            w._thinking_support(thinker["path"])                                      # cached by file, not read again
+        self.assertEqual(w._think_cache[thinker["path"]][0],stamp)
+
+    def test_reasoning_streams_into_a_fold_that_collapses_when_the_answer_starts(self):
+        w=self.window;w.operation="chat"
+        w.current_chat["messages"]=[{"role":"user","content":"hi"},{"role":"assistant","content":"","status":"generating","model_name":"Qwen Test"}]
+        w._thinking_delta("Let me ");w._thinking_delta("think.");w._render_active()
+        text=w.transcript.toPlainText()
+        self.assertIn("QWEN TEST",text);self.assertIn("Thinking…",text);self.assertIn("Let me think.",text)    # open while it thinks
+        w._delta("The answer");w._finished({"reason":"stop","generated_tokens":4,"elapsed_seconds":2.0})
+        message=w.current_chat["messages"][-1]
+        self.assertEqual((message["thinking"],message["content"]),("Let me think.","The answer"))
+        self.assertIn("thinking_seconds",message)
+        text=w.transcript.toPlainText()
+        self.assertIn("Thought for",text) if message["thinking_seconds"]>=1 else self.assertIn("Thoughts",text)
+        self.assertNotIn("Let me think.",text)                                       # collapsed once the answer is there
+        w.transcript._link_clicked(QUrl("think:1"))
+        self.assertIn("Let me think.",w.transcript.toPlainText())
+        w.transcript._link_clicked(QUrl("think:1"))
+        self.assertNotIn("Let me think.",w.transcript.toPlainText())
+        w.transcript._link_clicked(QUrl("think:99"));w.transcript._link_clicked(QUrl("think:abc"))   # bad links are ignored
+
+    def test_markdown_replies_are_formatted_and_raw_html_is_shown_as_text(self):
+        w=self.window
+        reply="## Plan\n\n**bold** and *italic* and `code`\n\n- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\nx = 1\n```\n\n<b>not bold</b> <img src='http://evil.example/x.png'>"
+        w.transcript.render([{"role":"user","content":"**not markdown** <b>x</b>"},{"role":"assistant","content":reply,"status":"complete"}])
+        html=w.transcript.toHtml();plain=w.transcript.toPlainText()
+        self.assertIn("**not markdown**",plain)                                      # your own text is never reinterpreted
+        for expected in ("Plan","bold","italic","one","two","x = 1"): self.assertIn(expected,plain)
+        self.assertNotIn("##",plain);self.assertNotIn("```",plain);self.assertNotIn("**bold**",plain)
+        self.assertIn("<table",html);self.assertIn("<ul",html);self.assertIn("font-weight:700",html)
+        self.assertIn("<b>not bold</b>",plain)                                       # shown literally, not applied
+        self.assertNotIn("evil.example",html.replace("&lt;","<")) if "<img" in html else None
+
+    def test_markdown_keeps_the_models_own_line_breaks_and_unfinished_code_blocks(self):
+        from gui.markdown import to_html
+        poem=to_html("Roses are red\nViolets are blue\n\nSecond verse")
+        self.assertIn("Roses are red",poem);self.assertTrue(poem.count("<br")>=1 or poem.count("<p")>=2)
+        partial=to_html("Here:\n```python\nprint('streaming'")
+        self.assertIn("streaming",partial)                                           # a half-streamed fence still renders
+        self.assertEqual(to_html("   \n"),"")
+        w=self.window;w.transcript.render([{"role":"assistant","content":"line one\nline two\nline three","status":"complete"}])
+        lines=[l for l in w.transcript.toPlainText().splitlines() if l.startswith("line")]
+        self.assertEqual(len(lines),3,w.transcript.toPlainText())
+
+    def test_links_only_open_when_clicked_and_only_web_addresses(self):
+        w=self.window
+        w.transcript.render([{"role":"assistant","content":"[site](https://example.com) [bad](javascript:alert(1)) [file](file:///etc/passwd)","status":"complete"}])
+        with patch("gui.widgets.QDesktopServices.openUrl") as opened:
+            for url in ("https://example.com","javascript:alert(1)","file:///etc/passwd","ftp://x/y"):
+                w.transcript._link_clicked(QUrl(url))
+            self.assertEqual([c.args[0].toString() for c in opened.call_args_list],["https://example.com"])
+        self.assertIn("site",w.transcript.toPlainText())                             # the view never navigated away
+
+    def test_streaming_redraws_are_coalesced_but_the_final_state_is_exact(self):
+        w=self.window;w.operation="chat"
+        w.current_chat["messages"]=[{"role":"user","content":"hi"},{"role":"assistant","content":"","status":"generating"}]
+        draws=[]
+        original=w.transcript.render
+        with patch.object(w.transcript,"render",side_effect=lambda *a,**k:(draws.append(1),original(*a,**k))[1]):
+            for _ in range(200): w._delta("x")
+            self.assertLess(len(draws),50)                                           # not one redraw per token
+            w._finished({"reason":"stop","generated_tokens":200,"elapsed_seconds":1.0})
+        self.assertEqual(w.transcript.toPlainText().count("x"),200)
+        self.assertFalse(w._render_timer.isActive())
+
     def test_status_card_and_train_badge_follow_activity(self):
         w=self.window
-        self.assertEqual(w.status_title.text(),"Engine idle")
+        self.assertEqual(w.status_title.text(),"No model loaded");self.assertFalse(w.model_status.isVisibleTo(w))
         w._engine_ready("NVIDIA Test GPU (compute 8.9)")
-        self.assertEqual((w.status_title.text(),w.gpu_status.text()),("Ready","NVIDIA Test GPU"))
+        self.assertEqual((w.status_title.text(),w.gpu_status.text()),("No model loaded","NVIDIA Test GPU"))   # a GPU alone is not a loaded model
+        w.engine.trance.loaded.emit({"model":"/m/trance1.2_30m.bin","parameters":30_000_000})
+        self.assertEqual((w.status_title.text(),w.model_status.text()),("Ready","Trance 1.2"))
+        self.assertTrue(w.model_status.isVisibleTo(w))
         w._set_busy(True);self.assertEqual(w.status_title.text(),"Generating…")
         w._set_busy(False);self.assertEqual(w.status_title.text(),"Ready")
         w.training_active=True;w.progress.setValue(320);w._update_status()
@@ -480,6 +671,30 @@ class ChatNavigationTests(unittest.TestCase):
         self.assertEqual((w.status_title.text(),w.status_dot.property("state")),("Last request failed","error"))
         w._set_busy(True);w._set_busy(False)
         self.assertEqual(w.status_title.text(),"Ready")
+
+    def test_eject_unloads_the_model_and_is_only_available_when_it_can_work(self):
+        w=self.window
+        self.assertFalse(w.eject_button.isEnabled())                        # nothing loaded yet
+        w.engine.trance.loaded.emit({"model":"/m/trance1.2_30m.bin","parameters":1})
+        self.assertTrue(w.eject_button.isEnabled())
+        w._set_busy(True);self.assertFalse(w.eject_button.isEnabled())     # not while a reply is being written
+        w._set_busy(False);self.assertTrue(w.eject_button.isEnabled())
+        w.training_active=True;w._update_eject();self.assertFalse(w.eject_button.isEnabled())
+        w.training_active=False;w._update_eject()
+        QTest.mouseClick(w.eject_button,Qt.MouseButton.LeftButton)
+        self.assertEqual(w.engine.loaded_model,"")
+        self.assertFalse(w.eject_button.isEnabled())
+        self.assertEqual(w.status_title.text(),"No model loaded");self.assertFalse(w.model_status.isVisibleTo(w))
+        self.assertIn("Ejected Trance 1.2",w.statusBar().currentMessage())
+
+    def test_a_gguf_model_shows_its_title_in_the_status_card(self):
+        w=self.window;info=self.gguf_info("Gemma Test")
+        with patch("gui.app.discover_gguf",return_value=[info]): w.refresh_models()
+        w.engine.llama.loaded.emit({"model":info["path"],"parameters":0})
+        self.assertEqual(w.model_status.text(),"Gemma Test")
+        self.assertTrue(w.eject_button.isEnabled())
+        w.engine.llama.unloaded.emit()                                       # the server crashed
+        self.assertEqual(w.status_title.text(),"No model loaded");self.assertFalse(w.eject_button.isEnabled())
 
     def test_recent_runs_list_opens_runs_and_protects_an_active_run(self):
         w=self.window

@@ -8,7 +8,8 @@ from PySide6.QtCore import QObject, Signal
 from ..engine import EngineClient
 from .llama_server import LlamaServerBackend
 
-_SIGNALS = ("delta", "started", "finished", "failed", "state_changed", "ready", "loaded")
+_SIGNALS = ("delta", "thinking", "started", "finished", "failed", "state_changed", "ready", "loaded")
+GGUF_ONLY_SETTINGS = ("thinking",)
 
 
 def backend_kind(model: str) -> str:
@@ -18,21 +19,37 @@ def backend_kind(model: str) -> str:
 
 class BackendRouter(QObject):
     delta = Signal(str)
+    thinking = Signal(str)
     started = Signal(dict)
     finished = Signal(dict)
     failed = Signal(str)
     state_changed = Signal(str)
     ready = Signal(str)
     loaded = Signal(dict)
+    unloaded = Signal()
 
     def __init__(self, parent=None, *, binary: Path | None = None, resolver=lambda: None):
         super().__init__(parent)
         self.trance = EngineClient(self, binary=binary)
         self.llama = LlamaServerBackend(resolver, self)
         self._active = self.trance
+        self.loaded_model = ""          # path of the model currently held in memory, or ""
+        self._loaded_backend = None
         for backend in (self.trance, self.llama):
+            backend.loaded.connect(self._note_loaded)   # connected first, so listeners of `loaded` already see loaded_model
             for name in _SIGNALS:
-                getattr(backend, name).connect(getattr(self, name))
+                if hasattr(backend, name):               # the native engine has no thinking channel
+                    getattr(backend, name).connect(getattr(self, name))
+        self.llama.unloaded.connect(lambda: self._clear_loaded(self.llama))
+
+    def _note_loaded(self, info: dict):
+        self.loaded_model = info["model"]
+        self._loaded_backend = self.llama if backend_kind(info["model"]) == "gguf" else self.trance
+
+    def _clear_loaded(self, backend=None):
+        if self.loaded_model and (backend is None or backend is self._loaded_backend):
+            self.loaded_model, self._loaded_backend = "", None
+            self.unloaded.emit()
 
     @property
     def backends(self):
@@ -47,8 +64,11 @@ class BackendRouter(QObject):
             raise RuntimeError("The engine is already working")
         chosen = self.llama if backend_kind(model) == "gguf" else self.trance
         for other in self.backends:           # only one backend may hold the GPU at a time
-            if other is not chosen: other.release()
+            if other is not chosen:
+                self._clear_loaded(other)
+                other.release()
         self._active = chosen
+        if chosen is self.trance: settings = {k: v for k, v in settings.items() if k not in GGUF_ONLY_SETTINGS}   # the native engine takes every field literally
         chosen.generate(model, messages, settings)
 
     def cancel(self):
@@ -59,6 +79,7 @@ class BackendRouter(QObject):
         if self.busy:
             raise RuntimeError("Stop generation before starting training")
         for backend in self.backends: backend.release()
+        self._clear_loaded()
 
     def close(self):
         for backend in self.backends: backend.close()

@@ -5,9 +5,10 @@ import html
 import math
 
 from PySide6.QtCore import Qt, Signal, QRect, QRectF
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QListWidget, QPlainTextEdit, QStyle, QStyledItemDelegate, QTextBrowser, QWidget
 
+from .markdown import to_html as to_markdown_html
 from .theme import STYLE, COLORS as C  # STYLE re-exported for existing imports
 
 
@@ -98,16 +99,46 @@ class Composer(QPlainTextEdit):
 
 
 class Transcript(QTextBrowser):
+    """The conversation view: plain text for you, rendered markdown for the model, and a collapsible thinking block."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setOpenLinks(False)           # links never navigate this view; see _link_clicked
         self.setOpenExternalLinks(False)
         self.setObjectName("transcript")
         self.setReadOnly(True)
+        self.anchorClicked.connect(self._link_clicked)
 
     def restyle(self):
         """Redraw with the current theme colors (the HTML bakes them in)."""
         messages, title, text = getattr(self, "_last", ([], "", ""))
         self.render(messages, title, text)
+
+    def _link_clicked(self, url):
+        if url.scheme() == "think":
+            messages = getattr(self, "_last", ([],))[0]
+            try: message = messages[int(url.path())]
+            except (ValueError, IndexError): return
+            message["thinking_open"] = not message.get("thinking_open", False)
+            self.restyle()
+        elif url.scheme() in ("http", "https"):
+            QDesktopServices.openUrl(url)        # only when the reader clicks; nothing is ever fetched automatically
+
+    @staticmethod
+    def _thinking_html(index: int, message: dict) -> str:
+        thinking = message.get("thinking", "")
+        if not thinking: return ""
+        waiting = message.get("status") == "generating" and not message.get("content")
+        opened = waiting or message.get("thinking_open", False)
+        seconds = message.get("thinking_seconds")
+        title = "Thinking\u2026" if waiting else (f"Thought for {seconds:.0f} s" if seconds and seconds >= 1 else "Thoughts")
+        muted = C["text_muted"]
+        arrow = "\u25be" if opened else "\u25b8"
+        escaped = html.escape(thinking).replace(chr(10), "<br>")
+        head = (f'<p style="font-size:12px;margin-top:0px;margin-bottom:2px"><a href="think:{index}" style="color:{muted};text-decoration:none">'
+                f'{arrow} {title}</a></p>')
+        body = (f'<p style="color:{muted};font-size:12px;margin-left:14px;margin-top:2px;line-height:140%"><i>{escaped}</i></p>') if opened else ""
+        return head + body
 
     def render(self, messages: list[dict], empty_title="", empty_text=""):
         self._last = (messages, empty_title, empty_text)
@@ -118,16 +149,19 @@ class Transcript(QTextBrowser):
             body = f'<h2 style="color:{C["text"]}">{html.escape(empty_title)}</h2><p style="color:{C["text_muted"]}">{html.escape(empty_text)}</p>' if empty_title or empty_text else ""
         else:
             blocks = []
-            for m in messages:
-                role = "You" if m["role"] == "user" else "Trance"
-                color = C["text_subtle"] if m["role"] == "user" else C["accent"]
-                text = html.escape(m.get("content", "")).replace("\n", "<br>")
-                if not text:
-                    text = f'<span style="color:{C["text_muted"]}">Thinking…</span>' if m.get("status") == "generating" else f'<span style="color:{C["text_muted"]}">No response text.</span>'
+            for index, m in enumerate(messages):
+                user = m["role"] == "user"
+                role = "You" if user else (m.get("model_name") or "Trance")
+                color = C["text_subtle"] if user else C["accent"]
+                content = m.get("content", "")
+                if user: text = f'<p style="color:{C["text"]};line-height:150%">{html.escape(content).replace(chr(10), "<br>")}</p>'
+                elif content.strip(): text = to_markdown_html(content)
+                elif m.get("status") == "generating": text = "" if m.get("thinking") else f'<p style="color:{C["text_muted"]}">Generating\u2026</p>'
+                else: text = f'<p style="color:{C["text_muted"]}">No response text.</p>'
                 note = html.escape(m.get("note", ""))
-                blocks.append(f'<p style="color:{color};font-size:12px"><b>{role.upper()}</b></p>'
-                              f'<p style="color:{C["text"]};line-height:150%">{text}</p>'
-                              f'<p style="color:{C["text_muted"]};font-size:11px">{note}</p><br>')
+                blocks.append(f'<p style="color:{color};font-size:12px"><b>{html.escape(role.upper())}</b></p>'
+                              + ("" if user else self._thinking_html(index, m)) + text
+                              + f'<p style="color:{C["text_muted"]};font-size:11px">{note}</p><br>')
             body = "".join(blocks)
         self.setHtml('<html><body style="font-family:DejaVu Sans;font-size:14px;margin:24px">' + body + '</body></html>')
         bar.setValue(bar.maximum() if at_bottom else scroll)

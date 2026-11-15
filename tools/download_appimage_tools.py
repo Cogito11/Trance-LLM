@@ -3,7 +3,7 @@
 from pathlib import Path
 import urllib.request
 
-from build_appimage import TOOL, TOOL_SHA, RUNTIME, RUNTIME_SHA, sha
+from build_appimage import TOOL, TOOL_SHA, TOOL_URL, RUNTIME, RUNTIME_SHA, RUNTIME_URL, sha
 
 
 def download(destination: Path, url: str, digest: str):
@@ -18,7 +18,7 @@ def download(destination: Path, url: str, digest: str):
             while chunk := response.read(1024 * 1024):
                 output.write(chunk)
         if sha(temporary) != digest:
-            raise ValueError(f"Checksum mismatch for {destination.name}; upstream continuous release may have changed")
+            raise ValueError(f"Checksum mismatch for {destination.name}; the pinned release asset has changed upstream")
         temporary.replace(destination)
         destination.chmod(0o755)
         print(f"Downloaded and verified {destination.name}")
@@ -27,5 +27,5 @@ def download(destination: Path, url: str, digest: str):
 
 
 if __name__ == "__main__":
-    download(TOOL, "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage", TOOL_SHA)
-    download(RUNTIME, "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64", RUNTIME_SHA)
+    download(TOOL, TOOL_URL, TOOL_SHA)
+    download(RUNTIME, RUNTIME_URL, RUNTIME_SHA)

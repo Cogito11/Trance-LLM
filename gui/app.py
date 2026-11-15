@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
     QMenu, QInputDialog, QLineEdit, QListWidget, QGridLayout)
 
 from .backends.router import BackendRouter, backend_kind
-from .gguf import discover_gguf, read_gguf_info
+from .gguf import discover_gguf, read_chat_template, read_gguf_info, supports_thinking
 from .runtimes import RuntimeManager
 from . import APP_NAME
 from .storage import ROOT, STATE, atomic_json, read_json, new_chat, completed_context, discover_models, model_info, validate_config
@@ -114,11 +114,15 @@ class MainWindow(QMainWindow):
         self.training_base_step = 0
         self.section_last = {0: 0, 1: 2, 2: 1}  # last page opened in each sidebar section
         self._busy = False
+        self._last_render = 0.0
+        self._think_started = 0.0
+        self._render_timer = QTimer(self); self._render_timer.setSingleShot(True); self._render_timer.setInterval(40)
+        self._render_timer.timeout.connect(self._render_active)
         self._engine_error = False
-        self._gpu_ready = False
         self._closing = False
         self.models = []
-        self.runtimes = RuntimeManager(self.state_dir, lambda: self.preferences.get("llama_server_path", ""), self._set_llama_path, self)
+        self.runtimes = RuntimeManager(self.state_dir, lambda: self.preferences.get("llama_server_path", ""), self._set_llama_path, self,
+                                       get_active=lambda: self.preferences.get("llama_runtime", ""), set_active=self._set_llama_runtime)
         self.engine = BackendRouter(self, binary=binary, resolver=self.runtimes.resolve)
         self.engine.delta.connect(self._delta)
         self.engine.started.connect(self._generation_started)
@@ -127,6 +131,8 @@ class MainWindow(QMainWindow):
         self.engine.state_changed.connect(self.statusBar().showMessage)
         self.engine.ready.connect(self._engine_ready)
         self.engine.loaded.connect(self._model_loaded)
+        self.engine.thinking.connect(self._thinking_delta)
+        self.engine.unloaded.connect(self._model_unloaded)
         self.runtimes.changed.connect(self._update_welcome)
         self._build()
         self.refresh_models()
@@ -219,9 +225,10 @@ class MainWindow(QMainWindow):
         self.status_dot = label("\u25cf", "statusDot"); self.status_dot.setProperty("state", "idle")
         card_layout.addWidget(self.status_dot,0,Qt.AlignmentFlag.AlignTop)
         status_text = QVBoxLayout(); status_text.setSpacing(1)
-        self.status_title = label("Engine idle", "statusTitle")
+        self.status_title = label("No model loaded", "statusTitle")
+        self.model_status = label("", "statusModel"); self.model_status.setVisible(False)
         self.gpu_status = label("CUDA engine", "muted"); self.gpu_status.setWordWrap(True)
-        status_text.addWidget(self.status_title); status_text.addWidget(self.gpu_status); card_layout.addLayout(status_text,1)
+        status_text.addWidget(self.status_title); status_text.addWidget(self.model_status); status_text.addWidget(self.gpu_status); card_layout.addLayout(status_text,1)
         left.addWidget(card)
         layout.addWidget(sidebar)
         self.pages = QStackedWidget(); layout.addWidget(self.pages, 1)
@@ -242,13 +249,17 @@ class MainWindow(QMainWindow):
         self.temperature = QDoubleSpinBox(); self.temperature.setRange(.05,2); self.temperature.setSingleStep(.05); self.temperature.setValue(self.preferences.get("temperature",.8))
         self.top_p = QDoubleSpinBox(); self.top_p.setRange(.01,1); self.top_p.setSingleStep(.05); self.top_p.setValue(self.preferences.get("top_p",.95))
         self.top_k = QSpinBox(); self.top_k.setRange(0,1024); self.top_k.setValue(self.preferences.get("top_k",40))
-        self.max_tokens = QSpinBox(); self.max_tokens.setRange(1,1023); self.max_tokens.setValue(self.preferences.get("max_new_tokens",160))
+        self.max_tokens = QSpinBox(); self.max_tokens.setRange(0,1023); self.max_tokens.setSpecialValueText("No limit")
+        # Small Trance models do best with a modest cap; chat models should be left to finish their answer. Remember each separately.
+        self._max_values = {"trance": self.preferences.get("max_new_tokens",160), "gguf": self.preferences.get("max_new_tokens_gguf",0)}
+        self._max_kind = "trance"; self.max_tokens.setValue(self._max_values["trance"])
+        self.max_tokens.valueChanged.connect(lambda value: self._max_values.__setitem__(self._max_kind, value))
         self.seed = QSpinBox(); self.seed.setRange(0,2**31-1); self.seed.setValue(self.preferences.get("seed",4004))
         parameters = (
             ("Temperature",self.temperature,"Controls randomness. Lower values give more predictable replies; higher values add variety."),
             ("Top P",self.top_p,"Keeps likely next tokens up to this total probability. Lower values narrow the choices."),
             ("Top K",self.top_k,"Limits each choice to the K most likely tokens. Set 0 to allow the whole vocabulary."),
-            ("Max tokens",self.max_tokens,"Caps the reply length. A token can be a word, part of a word or punctuation."),
+            ("Max tokens",self.max_tokens,"Caps the reply length. No limit lets the model finish its answer: GGUF models stop when they are done or the context window is full, and Trance models may use up to half their context window."),
             ("Seed",self.seed,"Use the same seed with an identical model, prompt and settings to repeat a response."),
         )
         self.parameter_descriptions = {}
@@ -280,7 +291,9 @@ class MainWindow(QMainWindow):
         self.browse_model_button = button("Browse…",self._browse_model)
         self.refresh_model_button = button("↻",self.refresh_models); self.refresh_model_button.setFixedWidth(34)
         self.refresh_model_button.setToolTip("Refresh the model list"); self.refresh_model_button.setAccessibleName("Refresh models")
-        models.addWidget(self.model_combo,1); models.addWidget(self.browse_model_button); models.addWidget(self.refresh_model_button)
+        self.eject_button = button("Eject",self._eject_model); self.eject_button.setEnabled(False)
+        self.eject_button.setToolTip("Unload the model and free its memory"); self.eject_button.setAccessibleName("Eject model")
+        models.addWidget(self.model_combo,1); models.addWidget(self.browse_model_button); models.addWidget(self.refresh_model_button); models.addWidget(self.eject_button)
         floating = QHBoxLayout(); floating.addStretch(); floating.addWidget(self.model_controls); floating.addStretch(); box.addLayout(floating)
         self.chat_content = QStackedWidget()
         self.transcript = Transcript(); self.chat_content.addWidget(self.transcript)
@@ -306,10 +319,13 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout(self.response_controls); actions.setContentsMargins(0,0,0,0); actions.setSpacing(6)
         self.stop_button = button("Stop response",self._stop); self.stop_button.setEnabled(False); actions.addWidget(self.stop_button)
         self.send_button = button("Send message",self._send_chat,True); actions.addWidget(self.send_button)
-        for widget in (self.browse_model_button,self.refresh_model_button,self.stop_button,self.send_button): widget.setProperty("compact",True)
-        footer = QHBoxLayout()
+        for widget in (self.browse_model_button,self.refresh_model_button,self.eject_button,self.stop_button,self.send_button): widget.setProperty("compact",True)
+        footer = QHBoxLayout(); footer.setSpacing(10)
+        self.think_button = QPushButton("Think"); self.think_button.setObjectName("thinkToggle"); self.think_button.setCheckable(True)
+        self.think_button.setCursor(Qt.CursorShape.PointingHandCursor); self.think_button.setChecked(self.preferences.get("thinking",False) is True)
+        self.think_button.toggled.connect(lambda _on: self._save_preferences()); self._think_cache = {}
         self.chat_hint = label("Enter to send · Shift+Enter for a new line","composerHint"); self.chat_hint.setWordWrap(True)
-        footer.addWidget(self.chat_hint,1); footer.addWidget(self.response_controls); panel.addLayout(footer)
+        footer.addWidget(self.think_button); footer.addWidget(self.chat_hint,1); footer.addWidget(self.response_controls); panel.addLayout(footer)
         self.suggestion_row = QWidget(); self.suggestion_row.setObjectName("sidebarPanel")
         row = QHBoxLayout(self.suggestion_row); row.setContentsMargins(0,0,0,0); row.setSpacing(8)
         box.addWidget(self.suggestion_row); box.addWidget(self.composer_panel)
@@ -424,26 +440,78 @@ class MainWindow(QMainWindow):
             self.model_combo.setCurrentIndex(self.model_combo.findData(info["path"]))
         except (OSError,ValueError) as error: self.statusBar().showMessage(str(error))
 
+    def _model_name(self, path):
+        info = next((m for m in self.models if m["path"] == path), None)
+        if info and info.get("kind") == "gguf": return info["title"]
+        return friendly(path) if backend_kind(path) == "trance" else Path(path).stem
+
+    def _eject_model(self):
+        if self.engine.busy or self.training_active or not self.engine.loaded_model: return
+        name = self._model_name(self.engine.loaded_model)
+        self.engine.release()
+        self.statusBar().showMessage(f"Ejected {name}; its memory is free")
+
+    def _update_eject(self):
+        ready = bool(self.engine.loaded_model) and not (self._busy or self.engine.busy) and not self.training_active
+        self.eject_button.setEnabled(ready)
+
+    def _model_unloaded(self):
+        self._update_eject(); self._update_status()
+
     def _model_loaded(self, info):
         name = friendly(info["model"]) if backend_kind(info["model"]) == "trance" else Path(info["model"]).stem
         size = f" \u00b7 {info['parameters']/1e6:.2f}M parameters" if info.get("parameters") else ""
         self.statusBar().showMessage(f"Loaded {name}{size}")
+        self._update_eject(); self._update_status()
 
     def _set_llama_path(self, value):
         self.preferences["llama_server_path"] = value; self._save_preferences()
+
+    def _set_llama_runtime(self, value):
+        self.preferences["llama_runtime"] = value; self._save_preferences()
 
     def _model_changed(self):
         path = self.model_combo.currentData()
         self._update_welcome()
         info = next((m for m in self.models if m["path"]==path),None)
+        kind = backend_kind(path) if path else "trance"
         if info and info.get("kind") == "gguf":
             quant = f" \u00b7 {info['quantization']}" if info.get("quantization") else ""
             self.model_combo.setToolTip(f"GGUF ({info['architecture']}) \u00b7 {info['context_length']:,} token context{quant} \u00b7 {human_size(info['size_bytes'])}")
-            if hasattr(self,"max_tokens") and info["context_length"]: self.max_tokens.setMaximum(info["context_length"]-1)
         elif info:
             self.model_combo.setToolTip(f"{info['parameters']/1e6:.2f}M parameters · {info['context_length']:,} token context · Step {info['step']:,}")
-            if hasattr(self,"max_tokens"): self.max_tokens.setMaximum(info["context_length"]-1)
         else: self.model_combo.setToolTip("Select a trained model or browse to a checkpoint with its tokenizer.")
+        if hasattr(self,"max_tokens"):
+            context = info["context_length"] if info else 0
+            self._apply_max_tokens(kind, context-1 if context else (131071 if kind=="gguf" else 1023))
+        if hasattr(self,"think_button"): self._update_think_button()
+
+    def _thinking_support(self, model):
+        """Whether a GGUF model's chat template has a thinking mode (read once per file, then remembered)."""
+        if backend_kind(model) != "gguf": return False
+        try: stamp = Path(model).stat().st_mtime
+        except OSError: return False
+        cached = self._think_cache.get(model)
+        if cached is None or cached[0] != stamp:
+            try: supported = supports_thinking(read_chat_template(Path(model)))
+            except ValueError: supported = False
+            cached = self._think_cache[model] = (stamp, supported)
+        return cached[1]
+
+    def _update_think_button(self):
+        model = self.model_combo.currentData()
+        if not model: enabled, tip = False, "Thinking mode, for models that support it. Choose a model first."
+        elif backend_kind(model) == "trance": enabled, tip = False, "Trance models do not have a thinking mode."
+        elif self._thinking_support(model): enabled, tip = True, "Let the model think before it answers. The reasoning is shown in a fold above the reply."
+        else: enabled, tip = False, "This model does not have a thinking mode."
+        self.think_button.setEnabled(enabled); self.think_button.setToolTip(tip)
+
+    def _apply_max_tokens(self, kind, maximum):
+        """Show the remembered limit for this kind of model without overwriting the other kind's value."""
+        self.max_tokens.blockSignals(True)
+        self.max_tokens.setMaximum(maximum); self._max_kind = kind
+        self.max_tokens.setValue(min(self._max_values[kind], maximum))
+        self.max_tokens.blockSignals(False)
 
     def _refresh_chats(self):
         active = self.current_chat["id"] if self.current_chat else None
@@ -513,7 +581,7 @@ class MainWindow(QMainWindow):
                 f'<span style="color:{C["accent"]}">\u25cf</span> Validation')
 
     def _engine_ready(self, gpu):
-        self._gpu_ready = True; self.gpu_status.setText(gpu.split(" (compute")[0]); self._update_status()
+        self.gpu_status.setText(gpu.split(" (compute")[0]); self._update_status()
 
     @staticmethod
     def _repolish(widget):
@@ -523,9 +591,14 @@ class MainWindow(QMainWindow):
         if self.training_active: state, title = "busy", f"Training \u00b7 {self.progress.value()//10}%"
         elif self._busy: state, title = "busy", "Generating\u2026"
         elif self._engine_error: state, title = "error", "Last request failed"
-        elif self._gpu_ready: state, title = "ok", "Ready"
-        else: state, title = "idle", "Engine idle"
+        elif self.engine.loaded_model: state, title = "ok", "Ready"
+        else: state, title = "idle", "No model loaded"
         self.status_title.setText(title)
+        loaded = self.engine.loaded_model
+        self.model_status.setVisible(bool(loaded))
+        if loaded:
+            name = self._model_name(loaded)
+            self.model_status.setText(self.model_status.fontMetrics().elidedText(name, Qt.TextElideMode.ElideMiddle, 150)); self.model_status.setToolTip(name)
         if self.status_dot.property("state") != state:
             self.status_dot.setProperty("state", state); self._repolish(self.status_dot)
         seg = self.sections[1]; running = bool(self.training_active)
@@ -605,7 +678,9 @@ class MainWindow(QMainWindow):
         cursor = self.composer.textCursor(); cursor.movePosition(cursor.MoveOperation.End); self.composer.setTextCursor(cursor)
 
     def _save_preferences(self):
-        preferences = {**self.preferences, **self.sampling()}
+        self._max_values[self._max_kind] = self.max_tokens.value()
+        preferences = {**self.preferences, **self.sampling(), "thinking": self.think_button.isChecked(),
+                       "max_new_tokens": self._max_values["trance"], "max_new_tokens_gguf": self._max_values["gguf"]}   # sampling() only has the current kind's value
         try:
             atomic_json(self.state_dir/"settings.json",preferences)
             self.preferences = preferences
@@ -680,7 +755,17 @@ class MainWindow(QMainWindow):
         for widget in (self.model_combo,self.browse_model_button,self.refresh_model_button,self.compare_a,self.compare_b,self.compare_prompt,self.temperature,self.top_p,self.top_k,self.max_tokens,self.seed):
             widget.setEnabled(enabled)
         self.train_start.setEnabled(not busy and not self.training_active)
-        self._update_status()
+        self._update_eject(); self._update_status()
+
+    def _generation_settings(self, model, base=None):
+        """Sampling settings for one request, adapted to the kind of model."""
+        settings = dict(self.sampling() if base is None else base)
+        if backend_kind(model) == "trance" and not settings.get("max_new_tokens"):
+            info = next((m for m in self.models if m["path"] == model), None)
+            settings["max_new_tokens"] = max(1, (info["context_length"] if info else 1024) // 2)   # "No limit": half the window leaves room for the prompt
+        if backend_kind(model) == "gguf" and self._thinking_support(model):
+            settings["thinking"] = self.think_button.isChecked()        # models without a thinking mode get no switch at all
+        return settings
 
     def _send_chat(self):
         if self.engine.busy or self.training_active: return
@@ -689,7 +774,8 @@ class MainWindow(QMainWindow):
         if not model: self.statusBar().showMessage("Choose a trained model first"); return
         context = completed_context(self.current_chat["messages"])
         self.current_chat["model"]=model
-        self.current_chat["messages"].extend([{"role":"user","content":text}, {"role":"assistant","content":"","status":"generating"}])
+        settings = self._generation_settings(model)
+        self.current_chat["messages"].extend([{"role":"user","content":text}, {"role":"assistant","content":"","status":"generating","token_limit":settings["max_new_tokens"],"model_name":self._model_name(model)}])
         if self.current_chat["title"]=="New conversation": self.current_chat["title"]=" ".join(text.split())[:45]
         if not self.current_chat.get("temporary") and not any(c["id"]==self.current_chat["id"] for c in self.chats):
             self.chats.insert(0,self.current_chat)
@@ -697,7 +783,7 @@ class MainWindow(QMainWindow):
         self._show_page(0)
         self._show_chat_content()
         self.transcript.render(self.current_chat["messages"]); self._set_busy(True)
-        self.engine.generate(model,context+[{"role":"user","content":text}],self.sampling())
+        self.engine.generate(model,context+[{"role":"user","content":text}],settings)
 
     def _start_compare(self):
         if self.engine.busy or self.training_active: return
@@ -719,8 +805,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Comparison stopped")
             return
         self.operation="compare"
-        self.engine.generate(self.comparison["models"][self.compare_index],
-                             [{"role":"user","content":self.comparison["prompt"]}],self.comparison["settings"])
+        model = self.comparison["models"][self.compare_index]
+        settings = self._generation_settings(model, self.comparison["settings"])
+        self.comparison["responses"][self.compare_index].update(token_limit=settings["max_new_tokens"], model_name=self._model_name(model))
+        self.engine.generate(model,[{"role":"user","content":self.comparison["prompt"]}],settings)
 
     def _active_message(self):
         if self.operation=="chat": return self.current_chat["messages"][-1]
@@ -728,13 +816,27 @@ class MainWindow(QMainWindow):
         return None
 
     def _render_active(self):
+        self._render_timer.stop(); self._last_render = time.monotonic()
         if self.operation=="chat": self.transcript.render(self.current_chat["messages"])
         elif self.operation=="compare": self.compare_views[self.compare_index].render([self._active_message()])
+
+    def _request_render(self):
+        wait = 0.04 - (time.monotonic() - self._last_render)     # at most ~25 redraws a second, however fast tokens arrive
+        if wait <= 0: self._render_active()
+        elif not self._render_timer.isActive(): self._render_timer.start(int(wait * 1000) + 1)
 
     def _delta(self,text):
         message=self._active_message()
         if message is not None:
-            message["content"]+=text; self._render_active()
+            if message.get("thinking") and "thinking_seconds" not in message:
+                message["thinking_seconds"] = round(time.monotonic() - self._think_started, 1)   # the answer has started: thinking is over
+            message["content"]+=text; self._request_render()
+
+    def _thinking_delta(self,text):
+        message=self._active_message()
+        if message is not None:
+            if not message.get("thinking"): self._think_started = time.monotonic()
+            message["thinking"] = message.get("thinking","") + text; self._request_render()
 
     def _generation_started(self,event):
         message=self._active_message()
@@ -751,10 +853,11 @@ class MainWindow(QMainWindow):
         reason=event.get("reason"); message["status"]="cancelled" if reason=="cancelled" else "complete"
         tokens=event.get("generated_tokens",0); elapsed=event.get("elapsed_seconds",0)
         message["metrics"]={"generated_tokens":tokens,"elapsed_seconds":elapsed,"reason":reason}
+        if message.get("thinking") and "thinking_seconds" not in message: message["thinking_seconds"]=round(time.monotonic()-self._think_started,1)
         if event.get("prompt_tokens") is not None and event.get("context_length"):
             message["prompt_tokens"]=event["prompt_tokens"]
             if self.operation=="chat": self.chat_hint.setText(f"Context: {event['prompt_tokens']+tokens:,}/{event['context_length']:,} tokens")
-        message["note"]=f"{tokens} tokens · {elapsed:.1f}s" + (" · stopped" if reason=="cancelled" else " · response limit reached" if reason=="length" else "")
+        message["note"]=f"{tokens} tokens · {elapsed:.1f}s" + (" · stopped" if reason=="cancelled" else (" · response limit reached" if message.get("token_limit") else " · context window full") if reason=="length" else "")
         self._render_active()
         if self.operation=="chat": self._save_chats()
         elif self.compare_index==0 and not self.compare_cancelled and reason!="cancelled":

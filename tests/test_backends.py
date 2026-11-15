@@ -88,6 +88,28 @@ class ChatStreamTests(AppCase):
         self.assertEqual((body["temperature"], body["top_p"], body["top_k"], body["max_tokens"], body["seed"]), (0.7, 0.9, 30, 50, 11))
         self.assertTrue(body["stream"])
 
+    def test_no_limit_omits_max_tokens_and_thinking_is_sent_as_a_template_switch(self):
+        self.assertNotIn("max_tokens", build_payload("m", [], {"max_new_tokens": 0}))
+        self.assertNotIn("max_tokens", build_payload("m", [], {}))
+        self.assertEqual(build_payload("m", [], {"max_new_tokens": 25})["max_tokens"], 25)
+        self.assertNotIn("chat_template_kwargs", build_payload("m", [], {"thinking": None}))
+        self.assertEqual(build_payload("m", [], {"thinking": True})["chat_template_kwargs"], {"enable_thinking": True})
+        self.assertEqual(build_payload("m", [], {"thinking": False})["chat_template_kwargs"], {"enable_thinking": False})
+        rec = self.run_stream(build_payload("fake-model", [], {"max_new_tokens": 0, "thinking": False}))
+        self.assertEqual(rec.payload("done")["reason"], "stop")
+        sent = self.server.RequestHandlerClass.seen[-1]["body"]
+        self.assertNotIn("max_tokens", sent); self.assertEqual(sent["chat_template_kwargs"], {"enable_thinking": False})
+
+    def test_reasoning_arrives_on_its_own_channel_and_never_in_the_answer(self):
+        stream = ChatStream(self.url, build_payload("fake-model", [], {"thinking": True}), self.auth)
+        rec = Recorder(stream, "thinking", "delta", "done", "failed")
+        stream.start(); self.assertTrue(pump(self.app, lambda: stream.isFinished())); self.app.processEvents()
+        self.assertEqual("".join(v for n, v in rec.events if n == "thinking"), "Let me think about it.")
+        self.assertEqual("".join(rec.text), "Hello from the fake server.")
+        self.assertEqual(rec.payload("done")["generated_tokens"], 6, "reasoning is not counted as answer text")
+        off = self.run_stream(build_payload("fake-model", [], {"thinking": False}))
+        self.assertEqual("".join(off.text), "Hello from the fake server.")
+
     def test_length_limit_is_reported(self):
         rec = self.run_stream(build_payload("fake-model", [], {"max_new_tokens": 3}))
         self.assertEqual(rec.payload("done")["reason"], "length")
@@ -160,7 +182,7 @@ class LlamaServerBackendTests(AppCase):
         self.ask()
         args = self.backend.process.arguments()
         self.assertEqual(args[args.index("--host") + 1], "127.0.0.1")
-        self.assertTrue(len(args[args.index("--api-key") + 1]) >= 16)
+        self.assertRegex(args[args.index("--api-key") + 1], r"^[0-9a-f]{32}$")   # never starts with '-', which a parser would read as an option
         self.assertIn("--no-webui", args)
 
     def test_the_server_does_not_inherit_the_apps_bundled_libraries(self):
@@ -171,10 +193,17 @@ class LlamaServerBackendTests(AppCase):
             self.ask()
         self.assertEqual(self.backend.process.processEnvironment().value("LD_LIBRARY_PATH"), "/usr/lib/mine")
 
+    def test_thinking_flows_through_the_server_backend(self):
+        rec = Recorder(self.backend, "thinking", "delta", "finished")
+        self.ask(settings={**SETTINGS, "thinking": True})
+        self.assertEqual("".join(v for n, v in rec.events if n == "thinking"), "Let me think about it.")
+        self.assertEqual("".join(rec.text), "Hello from the fake server.")
+
     def test_switching_models_restarts_the_server(self):
-        self.ask(); first = self.backend._port
+        self.ask(); first = self.backend.process        # keep a reference: the OS may reuse the same port, so compare processes
         self.ask(self.other)
-        self.assertNotEqual(self.backend._port, first)
+        self.assertIsNot(self.backend.process, first)
+        self.assertEqual(self.backend._model, str(self.other.resolve()))
         self.assertEqual(self.rec.names().count("loaded"), 1)
 
     def test_load_failure_shows_the_servers_own_message(self):
@@ -218,6 +247,19 @@ class LlamaServerBackendTests(AppCase):
         with self.assertRaises(RuntimeError): self.backend.generate(str(self.model), [], SETTINGS)
         self.backend.cancel()
 
+    def test_a_server_that_dies_by_itself_reports_the_model_unloaded(self):
+        rec = Recorder(self.backend, "unloaded")
+        self.ask()
+        self.backend.process.kill()
+        self.assertTrue(pump(self.app, lambda: bool(rec.names())))
+        self.assertEqual(rec.names(), ["unloaded"])
+        self.assertFalse(self.backend.running)
+
+    def test_a_deliberate_release_is_not_reported_as_a_crash(self):
+        rec = Recorder(self.backend, "unloaded")
+        self.ask(); self.backend.release(); self.app.processEvents()
+        self.assertEqual(rec.names(), [])
+
     def test_close_terminates_the_process(self):
         self.ask(); process = self.backend.process
         self.backend.close()
@@ -246,6 +288,44 @@ class RouterTests(AppCase):
         self.router.llama.delta.emit("x"); self.router.trance.finished.emit({"reason": "stop"})
         self.router.llama.failed.emit("nope")
         self.assertEqual(rec.text, ["x"]); self.assertEqual(rec.names(), ["finished", "failed"])
+
+    def test_router_tracks_the_loaded_model_and_announces_when_it_is_freed(self):
+        seen = []
+        self.router.loaded.connect(lambda info: seen.append(self.router.loaded_model))   # listeners already see the new state
+        rec = Recorder(self.router, "unloaded")
+        self.router.trance.loaded.emit({"model": "/m/a.bin", "parameters": 1})
+        self.assertEqual((self.router.loaded_model, seen), ("/m/a.bin", ["/m/a.bin"]))
+        self.router.release()
+        self.assertEqual((self.router.loaded_model, rec.names()), ("", ["unloaded"]))
+        self.router.release()
+        self.assertEqual(rec.names(), ["unloaded"], "nothing to announce when nothing was loaded")
+
+    def test_switching_engines_frees_the_previous_model(self):
+        rec = Recorder(self.router, "unloaded")
+        self.router.trance.loaded.emit({"model": "/m/a.bin", "parameters": 1})
+        with patch.object(self.router.llama, "generate"), patch.object(self.router.trance, "release") as freed:
+            self.router.generate("/m/b.gguf", [], SETTINGS)
+            freed.assert_called_once()
+        self.assertEqual((self.router.loaded_model, rec.names()), ("", ["unloaded"]))
+        self.router.llama.loaded.emit({"model": "/m/b.gguf", "parameters": 0})
+        self.assertEqual(self.router.loaded_model, "/m/b.gguf")
+        self.router.llama.unloaded.emit()                    # the server died on its own
+        self.assertEqual((self.router.loaded_model, rec.names()), ("", ["unloaded", "unloaded"]))
+        self.router.trance.loaded.emit({"model": "/m/a.bin", "parameters": 1})
+        self.router.llama.unloaded.emit()                    # an unrelated backend dying does not unload the loaded one
+        self.assertEqual(self.router.loaded_model, "/m/a.bin")
+
+    def test_thinking_from_the_server_backend_reaches_the_window(self):
+        rec = Recorder(self.router, "thinking")
+        self.router.llama.thinking.emit("hmm")
+        self.assertEqual([v for n, v in rec.events], ["hmm"])
+
+    def test_gguf_only_settings_never_reach_the_native_engine(self):
+        with patch.object(self.router.trance, "generate") as native, patch.object(self.router.llama, "generate") as llama:
+            self.router.generate("/m/a.bin", [], {"temperature": 1, "thinking": True})
+            self.assertEqual(native.call_args.args[2], {"temperature": 1})
+            self.router.generate("/m/b.gguf", [], {"temperature": 1, "thinking": True})
+            self.assertEqual(llama.call_args.args[2], {"temperature": 1, "thinking": True})
 
     def test_busy_is_shared_and_blocks_new_requests(self):
         with patch.object(type(self.router.llama), "busy", property(lambda self: True)):

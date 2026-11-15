@@ -12,7 +12,7 @@ CHAT_TEMPLATE = ("{% for m in messages %}{{ m['role'] }}: {{ m['content'] }}\n{%
                  "{% if add_generation_prompt %}assistant:{% endif %}")
 
 
-def build(path: Path, *, context=256, embed=64, layers=2, heads=4, ff=128, seed=7) -> Path:
+def build(path: Path, *, context=256, embed=64, layers=2, heads=4, ff=128, seed=7, template=CHAT_TEMPLATE) -> Path:
     import numpy as np
     from gguf import GGUFWriter, GGMLQuantizationType, TokenType
 
@@ -30,7 +30,7 @@ def build(path: Path, *, context=256, embed=64, layers=2, heads=4, ff=128, seed=
     w.add_file_type(0)
     w.add_tokenizer_model("llama"); w.add_token_list(pieces); w.add_token_scores([0.0] * vocab); w.add_token_types(types)
     w.add_bos_token_id(1); w.add_eos_token_id(2); w.add_unk_token_id(0)
-    w.add_chat_template(CHAT_TEMPLATE)
+    w.add_chat_template(template)
 
     def t(name, *shape, ones=False):
         data = np.ones(shape, dtype=np.float32) if ones else (rng.standard_normal(shape) * 0.05).astype(np.float32)

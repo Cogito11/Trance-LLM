@@ -23,6 +23,10 @@ def build_payload(model: str, messages: list[dict], settings: dict) -> dict:
                            ("max_new_tokens", "max_tokens"), ("seed", "seed")):
         if settings.get(source) is not None:
             payload[target] = settings[source]
+    if not payload.get("max_tokens"):
+        payload.pop("max_tokens", None)    # 0 means "no limit": the model decides when it is done, up to the context window
+    if settings.get("thinking") is not None:
+        payload["chat_template_kwargs"] = {"enable_thinking": bool(settings["thinking"])}
     return payload
 
 
@@ -40,6 +44,7 @@ class ChatStream(QThread):
     """One streamed completion. Emits started, delta* and then exactly one of done or failed."""
     started_stream = Signal()
     delta = Signal(str)
+    thinking = Signal(str)      # the model's reasoning, kept apart from its answer
     done = Signal(dict)
     failed = Signal(str)
 
@@ -82,7 +87,9 @@ class ChatStream(QThread):
                     usage_tokens = chunk["usage"].get("completion_tokens", usage_tokens)
                     prompt_tokens = chunk["usage"].get("prompt_tokens", prompt_tokens)
                 for choice in chunk.get("choices") or []:
-                    text = (choice.get("delta") or {}).get("content")
+                    piece = choice.get("delta") or {}
+                    if piece.get("reasoning_content"): self.thinking.emit(piece["reasoning_content"])
+                    text = piece.get("content")
                     if text:
                         tokens += 1; self.delta.emit(text)
                     if choice.get("finish_reason"): reason = choice["finish_reason"]
