@@ -34,8 +34,12 @@ COLORS = {
     "on_accent": "#04201d",
     "accent_disabled": "#1b4543",
     "accent_disabled_text": "#6c9390",
-    # Status
+    # Status and callout colors (shared by every palette)
     "danger": "#f87171",
+    "info": "#5ea4ff",
+    "success": "#4ade9a",
+    "warning": "#f2b45a",
+    "important": "#a78bfa",
     # Text selection
     "selection": "#2b4a7a",
 }
@@ -120,7 +124,7 @@ QPushButton[compact="true"] {{ padding: 8px 10px; font-size: 12px; }}
 QComboBox, QSpinBox, QDoubleSpinBox {{ background: {control}; border: 1px solid {border_strong}; border-radius: 6px; padding: 8px; }}
 QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {{ border-color: {accent}; }}
 QLineEdit {{ background: {control}; border: 1px solid {border_strong}; border-radius: 6px; padding: 8px; }}
-QComboBox {{ padding-right: 26px; }}
+QComboBox {{ padding-right: 26px; combobox-popup: 0; }}
 QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right; width: 26px; border: none; }}
 QComboBox::down-arrow {{ image: url({arrow_down}); width: 10px; height: 6px; }}
 QSpinBox, QDoubleSpinBox {{ padding-right: 22px; }}
@@ -129,7 +133,16 @@ QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-origin: border;
 QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{ background: {hover}; }}
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url({arrow_up}); width: 9px; height: 5px; }}
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url({arrow_down}); width: 9px; height: 5px; }}
-QComboBox QAbstractItemView {{ background: {control}; border: 1px solid {border_strong}; selection-background-color: {pressed}; outline: none; }}
+QFrame#comboPopup {{ background: transparent; border: none; }}
+QComboBox QAbstractItemView {{ background: {raised}; border: 1px solid {border_strong}; border-radius: 10px; padding: 6px; outline: none; selection-background-color: transparent; }}
+QComboBox QAbstractItemView::item {{ padding: 8px 12px; margin: 1px 0px; border-radius: 6px; min-height: 20px; color: {text_subtle}; }}
+QComboBox QAbstractItemView::item:hover {{ background: {hover}; color: {text}; }}
+QComboBox QAbstractItemView::item:selected {{ background: {selected_bg}; color: {accent}; }}
+QMenu {{ background: {raised}; border: 1px solid {border_strong}; border-radius: 10px; padding: 6px; }}
+QMenu::item {{ padding: 8px 28px 8px 14px; margin: 1px 0px; border-radius: 6px; color: {text_subtle}; }}
+QMenu::item:selected {{ background: {hover}; color: {text}; }}
+QMenu::item:disabled {{ color: {text_disabled}; }}
+QMenu::separator {{ height: 1px; background: {border}; margin: 5px 8px; }}
 QPlainTextEdit, QTextBrowser {{ background: {surface}; border: 1px solid {border_strong}; border-radius: 7px; padding: 10px; selection-background-color: {selection}; }}
 QTextBrowser#transcript {{ background: {base}; border: none; padding: 0; }}
 QTextBrowser#articleReader {{ background: {surface}; border: 1px solid {border_strong}; padding: 18px; font-size: 14px; }}

@@ -1,5 +1,14 @@
 """PyInstaller entry point shared by portable Linux and future Windows builds."""
-from gui.bootstrap import main
+import sys
+
+from gui.bootstrap import explain_startup_error, main
 
 if __name__=="__main__":
-    raise SystemExit(main())
+    try:
+        code=main()
+    except ImportError as error:
+        message=explain_startup_error(error)
+        if message is None: raise
+        print(message,file=sys.stderr)
+        code=1
+    raise SystemExit(code)

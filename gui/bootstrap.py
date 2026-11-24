@@ -8,6 +8,25 @@ from pathlib import Path
 import sys
 
 
+_PACKAGES = (("libGL.so", "libgl1"), ("libEGL.so", "libegl1"), ("libxkbcommon-x11", "libxkbcommon-x11-0"), ("libxkbcommon", "libxkbcommon0"),
+             ("libfontconfig", "libfontconfig1"), ("libxcb-cursor", "libxcb-cursor0"), ("libdbus", "libdbus-1-3"))
+
+
+def explain_startup_error(error):
+    """A plain-English message when the app cannot start because the system lacks a graphics library, else None.
+
+    The packaged app carries Qt and Python but uses the machine's own OpenGL stack, so a bare server image
+    (or a minimal container) can lack it. Without this the user sees a Python traceback.
+    """
+    text=str(error)
+    if "cannot open shared object file" not in text: return None
+    library=text.split(":")[0].strip() or "a system library"
+    package=next((pkg for prefix,pkg in _PACKAGES if library.startswith(prefix)),None)
+    hint=f"On Ubuntu or Debian: sudo apt install {package}" if package else "Install the package that provides it with your system's package manager."
+    return (f"Trance LLM could not start because this system is missing {library}, which the desktop interface needs.\n"
+            f"{hint}\n(Desktops normally have it; minimal server images and containers often do not.)")
+
+
 def appimage_project():
     """The folder holding the AppImage, when configs/ and models/ sit beside it (a downloaded release).
 

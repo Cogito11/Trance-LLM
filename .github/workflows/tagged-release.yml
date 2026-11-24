@@ -1,13 +1,24 @@
 name: Tagged Release
 
-# Builds trance.cu for Linux and Windows and publishes a proper GitHub
-# Release, with both builds attached as zips, whenever a version tag
-# (v12, v0.14, v1.2.3, ...) is pushed. Each zip contains the program, the
-# example configs, and empty data/ and models/ folders.
+# Builds Trance for Linux and Windows and publishes a proper GitHub Release,
+# with both builds attached as zips, whenever a version tag (v12, v0.14,
+# v1.2.3, ...) is pushed.
+#
+# Each zip contains only what is needed to run, laid out as the folder the
+# app expects:
+#   Linux:    the AppImage (the desktop app), the `trance` engine for command
+#             line use, and the configs/, data/ and models/ folders beside it.
+#   Windows:  trance.exe with the cuBLAS DLLs, and the same three folders.
+# Source code, tests and build tooling are left out; GitHub attaches the
+# source to every release automatically.
+#
+# You can also run this by hand from the Actions tab (workflow_dispatch) to
+# test changes; only a real tag push publishes a release.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -38,6 +49,7 @@ jobs:
             # Git Bash rewrites a leading "/MT" into a filesystem path.
             extra_flags: '-Xcompiler -MT'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,8 +91,43 @@ jobs:
         shell: bash
         run: |
           built_version=$(grep -oP '(?<=#define TRANCE_VERSION ")[^"]+' trance.cu || echo "not found")
+          app_version=$(grep -oP '(?<=APP_VERSION = ")[^"]+' gui/__init__.py || echo "not found")
           echo "trance.cu TRANCE_VERSION: $built_version"
+          echo "gui APP_VERSION:          $app_version (names the AppImage)"
           echo "git tag:                  ${GITHUB_REF_NAME}"
+
+      # Linux only: print where the cuBLAS libraries and their license text
+      # ended up, so a packaging failure below is easy to diagnose.
+      - name: Check CUDA runtime files (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "CUDA_PATH=$CUDA_PATH"
+          ls -la "$CUDA_PATH/lib64" 2>/dev/null | grep -i cublas || echo "no cuBLAS under $CUDA_PATH/lib64"
+          ls -d /usr/share/doc/libcublas* 2>/dev/null || echo "no libcublas docs under /usr/share/doc"
+          ls "$CUDA_PATH/EULA.txt" 2>/dev/null || echo "no EULA.txt in the toolkit"
+
+      # Linux only: the desktop app, as an AppImage. tools/build_appimage.py
+      # bundles Python, Qt, the engine just built above and the cuBLAS
+      # libraries from the toolkit installed above ($CUDA_PATH). The verify
+      # step starts the packaged app and checks its safety protocols without
+      # touching a GPU; AppImages are run with extract-and-run because hosted
+      # runners have no FUSE.
+      - name: Build AppImage (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          # squashfs-tools builds the image. The X11/xkb libraries are bundled into the AppImage, so they must be
+          # present here. libgl1 and libegl1 are NOT bundled (they come from the user's graphics stack) but Qt
+          # cannot even be imported without them, so the verify step below needs them on this runner.
+          sudo apt-get install -y --no-install-recommends squashfs-tools libgl1 libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 \
+            libxcb-shape0 libxcb-xkb1 libxcb-keysyms1 libxcb-icccm4 libxkbcommon-x11-0 libxcb-cursor0 libxcb-image0 libxcb-render-util0 libxcb-util1
+          python3 -m venv .venv-packaging
+          .venv-packaging/bin/python -m pip install --disable-pip-version-check -r packaging/requirements.txt
+          .venv-packaging/bin/python tools/download_appimage_tools.py
+          .venv-packaging/bin/python tools/build_appimage.py --engine "$PWD/trance"
+          APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen .venv-packaging/bin/python tools/verify_appimage.py
 
       # Lays out the folder users will get, then zips it. The empty data/
       # and models/ folders are created here because git can't track empty
@@ -95,6 +142,18 @@ jobs:
           pkg="trance-${GITHUB_REF_NAME}-${{ matrix.platform }}"
           mkdir -p "$pkg/data" "$pkg/models"
           cp "${{ matrix.output_name }}" "$pkg/"
+          cp -r configs "$pkg/configs"
+          cp LICENSE "$pkg/"
+          # Linux: the AppImage goes next to the engine and the folders, so
+          # double-clicking it finds configs/, data/ and models/ beside it.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            appimage=$(ls dist/TranceLLM-*-x86_64.AppImage | head -n 1)
+            if [ -z "$appimage" ]; then
+              echo "::error::The AppImage was not built"
+              exit 1
+            fi
+            cp "$appimage" "$pkg/"
+          fi
           # Windows only: the exe links cuBLAS dynamically, so end users
           # without the CUDA Toolkit would get "cublas64_12.dll was not
           # found". Copy the two runtime DLLs (cuBLAS loads cublasLt too)
@@ -112,12 +171,6 @@ jobs:
               cp "$src" "$pkg/"
             done
           fi
-          cp -r configs "$pkg/configs"
-          cp -r gui tests tools packaging "$pkg/"
-          cp -r native "$pkg/"
-          cp trance.cu "$pkg/"
-          cp trance-gui "$pkg/"
-          cp README.md LICENSE LLMS_EXPLAINED.md TRANCE.md "$pkg/"
           mkdir -p dist
           PY=$(command -v python || command -v python3)
           "$PY" -m zipfile -c "dist/${pkg}.zip" "$pkg"
@@ -130,6 +183,7 @@ jobs:
 
   publish:
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
@@ -144,3 +198,19 @@ jobs:
           name: Trance ${{ github.ref_name }}
           files: dist/*
           generate_release_notes: true
+          body: |
+            **Linux** (`trance-${{ github.ref_name }}-linux-x86_64.zip`): extract it
+            anywhere and run the AppImage. It uses the `configs/`, `data/` and
+            `models/` folders next to it, so you can double-click it from a
+            file manager. `trance` is the command-line engine. The desktop
+            app needs the system graphics libraries `libGL` and `libEGL`
+            (present on any desktop; on a minimal install:
+            `sudo apt install libgl1 libegl1`). If the AppImage will not
+            start, install FUSE 2 (`sudo apt install libfuse2t64` on Ubuntu
+            24.04) or run it with `--appimage-extract-and-run`.
+
+            **Windows** (`trance-${{ github.ref_name }}-windows-x86_64.zip`):
+            `trance.exe` with the cuBLAS DLLs, plus the same three folders.
+            The CUDA Toolkit is not required.
+
+            Both need an NVIDIA GPU with a current driver.

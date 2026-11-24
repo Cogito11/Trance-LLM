@@ -27,19 +27,37 @@ def json_output(result):
     raise ValueError(result.stdout+result.stderr)
 
 
+def run_checked(command,**kwargs):
+    """Run a command and, if it fails, print everything it said before stopping.
+
+    A bare CalledProcessError hides the reason (a missing system library, a Python traceback...), which is
+    exactly what you need to read when this check fails on a machine you cannot sit at.
+    """
+    kwargs.setdefault("capture_output",True); kwargs.setdefault("text",True); kwargs.pop("check",None)
+    try:
+        result=subprocess.run(command,**kwargs)
+    except subprocess.TimeoutExpired as error:
+        sys.stderr.write(f"Timed out after {error.timeout}s: {' '.join(map(str,command))}\n--- stdout ---\n{error.stdout or ''}\n--- stderr ---\n{error.stderr or ''}\n")
+        raise SystemExit(1)
+    if result.returncode!=0:
+        sys.stderr.write(f"Command failed with exit code {result.returncode}: {' '.join(map(str,command))}\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}\n")
+        raise SystemExit(1)
+    return result
+
+
 def main():
     env={**os.environ,"APPIMAGE_EXTRACT_AND_RUN":"1","QT_QPA_PLATFORM":"offscreen"}
-    diagnostics=subprocess.run([str(IMAGE),"--project",str(ROOT),"--diagnostics"],env=env,capture_output=True,text=True,timeout=90,check=True)
+    diagnostics=run_checked([str(IMAGE),"--project",str(ROOT),"--diagnostics"],env=env,capture_output=True,text=True,timeout=90,check=True)
     metadata=json_output(diagnostics)
     assert metadata['frozen'] and metadata['engine_exists']
     assert metadata['project']==str(ROOT)
     assert metadata['documentation_articles']>=14
     screenshot=ROOT/"dist/TranceLLM-preview.png"
-    subprocess.run([str(IMAGE),"--project",str(ROOT),"--screenshot",str(screenshot)],env=env,capture_output=True,text=True,timeout=90,check=True)
+    run_checked([str(IMAGE),"--project",str(ROOT),"--screenshot",str(screenshot)],env=env,capture_output=True,text=True,timeout=90,check=True)
     assert screenshot.is_file() and screenshot.read_bytes().startswith(b'\x89PNG')
     for page in ("configs","docs"):
         capture=ROOT/"dist"/f"TranceLLM-{page}-preview.png"
-        subprocess.run([str(IMAGE),"--project",str(ROOT),"--page",page,"--screenshot",str(capture)],env=env,capture_output=True,text=True,timeout=90,check=True)
+        run_checked([str(IMAGE),"--project",str(ROOT),"--page",page,"--screenshot",str(capture)],env=env,capture_output=True,text=True,timeout=90,check=True)
         assert capture.is_file() and capture.read_bytes().startswith(b'\x89PNG')
     with tempfile.TemporaryDirectory(prefix="trance-appimage-proof-") as temp:
         project=Path(temp); (project/"configs").mkdir(); (project/"models").mkdir();(project/"data").mkdir()
@@ -69,7 +87,7 @@ else:
                 "output_model":str(project/"models/mock.bin")}
         path=project/"configs/test.json"; path.write_text(json.dumps(config))
         probe_env={**env,"TRANCE_ENGINE_BINARY":str(mock)}
-        result=subprocess.run([str(IMAGE),"--project",str(project),"--verify-detached-worker",str(path)],
+        result=run_checked([str(IMAGE),"--project",str(project),"--verify-detached-worker",str(path)],
                               env=probe_env,capture_output=True,text=True,timeout=90,check=True)
         directory=Path(json_output(result)['run_dir'])
         # Parent AppImage has exited and removed its extracted runtime now.

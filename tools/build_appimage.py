@@ -36,6 +36,15 @@ def sha(path):
     return h.hexdigest()
 
 
+# PyInstaller only *warns* when it cannot find these, and the AppImage then opens no window on a machine without them.
+REQUIRED_BUNDLED_LIBS = ("libxcb-shape.so.0","libxcb-xkb.so.1","libxcb-keysyms.so.1","libxcb-icccm.so.4","libxkbcommon-x11.so.0","libxcb-cursor.so.0")
+BUILD_PACKAGES = "libxcb-shape0 libxcb-xkb1 libxcb-keysyms1 libxcb-icccm4 libxkbcommon-x11-0 libxcb-cursor0 libxcb-image0 libxcb-render-util0 libxcb-util1"
+
+
+def missing_bundled_libs(internal):
+    return [name for name in REQUIRED_BUNDLED_LIBS if not (Path(internal)/name).exists()]
+
+
 def cublas_search_dirs(environ=None):
     """Where the cuBLAS libraries may live: an explicit override, the CUDA toolkit, then the distro package location."""
     env = os.environ if environ is None else environ
@@ -115,6 +124,8 @@ def main():
     cursor=ROOT/".venv-gui/native-deps/root/usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0"
     if not cursor.exists(): cursor=Path("/lib/x86_64-linux-gnu/libxcb-cursor.so.0")
     if cursor.exists(): shutil.copy2(cursor.resolve(),appdir/"_internal/libxcb-cursor.so.0")
+    missing=missing_bundled_libs(appdir/"_internal")
+    if missing: raise SystemExit("The AppImage would not open a window on machines without: "+", ".join(missing)+f". Install them on the build machine first: sudo apt install {BUILD_PACKAGES}")
     licenses=appdir/"_internal/licenses"; licenses.mkdir(exist_ok=True)
     notices = find_cublas_licenses()
     if not notices: raise SystemExit("Cannot find the license text for the cuBLAS libraries (a libcublas* copyright file or the CUDA toolkit EULA.txt); it must ship with them.")

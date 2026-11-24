@@ -6,13 +6,14 @@ import tempfile
 import unittest
 from unittest.mock import patch, sentinel
 
-from PySide6.QtCore import QPoint, Qt, QUrl
+from PySide6.QtCore import QEvent, QPoint, Qt, QUrl
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QComboBox, QMenu, QPushButton
 
 from gui import APP_NAME, theme
 from gui.app import GREETINGS, SUGGESTIONS, MainWindow
 from gui.runtimes import RuntimeInfo
+from gui.widgets import Transcript, round_popup
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_gguf import chat_model, write as write_gguf  # noqa: E402
 from gui.storage import read_json, atomic_json, new_chat
@@ -650,6 +651,177 @@ class ChatNavigationTests(unittest.TestCase):
             w._finished({"reason":"stop","generated_tokens":200,"elapsed_seconds":1.0})
         self.assertEqual(w.transcript.toPlainText().count("x"),200)
         self.assertFalse(w._render_timer.isActive())
+
+    def test_the_gap_between_a_message_and_the_reply_is_modest(self):
+        w=self.window;w.chat_content.setCurrentIndex(0)                              # the transcript, not the welcome page
+        w.transcript.render([{"role":"user","content":"Make me a workout plan"},{"role":"assistant","content":"Sure, here it is.","status":"complete","model_name":"Gemma"}])
+        QTest.qWait(30)
+        doc=w.transcript.document()
+        y=lambda text:w.transcript.cursorRect(doc.find(text)).top()
+        gap=y("GEMMA")-y("Make me a workout plan")
+        self.assertLess(gap,75,f"{gap}px between the user's text and the reply label")    # it was about 110px
+        self.assertGreater(gap,30)
+        html=w.transcript.toHtml()
+        self.assertNotIn("<br />\n<br />",html)
+
+    def test_the_note_after_a_reply_reads_speed_then_tokens_then_time(self):
+        w=self.window;w.operation="chat"
+        def finish(event):
+            w.operation="chat"                                                         # each finish ends the operation
+            w.current_chat["messages"]=[{"role":"user","content":"hi"},{"role":"assistant","content":"x","status":"generating","token_limit":160}]
+            w._finished(event);return w.current_chat["messages"][-1]["note"]
+        self.assertEqual(finish({"reason":"stop","generated_tokens":612,"elapsed_seconds":9.8,"tokens_per_second":64.37}),"64.4 tok/s · 612 tokens · 9.8s")
+        self.assertEqual(finish({"reason":"stop","generated_tokens":100,"elapsed_seconds":4.0}),"25.0 tok/s · 100 tokens · 4.0s")      # computed when the engine gives none
+        self.assertEqual(finish({"reason":"stop","generated_tokens":1234,"elapsed_seconds":2.0,"tokens_per_second":None}),"617.0 tok/s · 1,234 tokens · 2.0s")
+        self.assertEqual(finish({"reason":"stop","generated_tokens":0,"elapsed_seconds":0.0}),"0 tokens · 0.0s")                      # nothing to divide
+        self.assertTrue(finish({"reason":"length","generated_tokens":160,"elapsed_seconds":5.0}).endswith("· response limit reached"))
+        self.assertEqual(w.current_chat["messages"][-1]["metrics"]["tokens_per_second"],32.0)
+
+    def test_composer_text_is_short(self):
+        w=self.window
+        self.assertEqual(w.composer.placeholderText(),"Enter a Message…")
+        self.assertEqual(w.chat_hint.text(),"Enter to send")
+        w._display_chat()
+        self.assertEqual(w.chat_hint.text(),"Enter to send")                            # and it comes back after a reply
+
+    def test_the_transcript_follows_new_text_only_while_the_reader_is_at_the_end(self):
+        t=self.window.transcript;bar=t.verticalScrollBar();self.window.resize(1100,700);self.window.show();self.window.chat_content.setCurrentIndex(0)
+        msgs=[{"role":"user","content":"long please"},{"role":"assistant","content":"","status":"generating"}]
+        def grow(count):
+            for _ in range(count):
+                msgs[1]["content"]+=f"Paragraph {len(msgs[1]['content'])//30} of the streamed answer.\n\n"
+                t.render(msgs);QTest.qWait(6)
+            QTest.qWait(50)
+        end=lambda:bar.value()>=bar.maximum()-6
+        t.follow_end();grow(30)
+        self.assertTrue(end(),"following the end while nobody has scrolled")
+        bar.setValue(0);QTest.qWait(20);before=bar.maximum();grow(25)
+        self.assertGreater(bar.maximum(),before);self.assertEqual(bar.value(),0)       # scrolled up: the view must not be dragged down
+        middle=bar.maximum()//2;bar.setValue(middle);QTest.qWait(20);grow(20)
+        self.assertEqual(bar.value(),middle)                                         # a position in the middle is held exactly
+        bar.setValue(bar.maximum());QTest.qWait(20);grow(25)
+        self.assertTrue(end(),"back at the end: following resumes")
+        bar.setValue(0);QTest.qWait(20)
+        t.follow_end();grow(2)                                                       # sending a message jumps to the reply
+        self.assertTrue(end())
+
+    def test_opening_or_sending_follows_the_end_even_after_scrolling_away(self):
+        w=self.window;t=w.transcript;bar=t.verticalScrollBar();w.resize(1100,700);w.show();w.chat_content.setCurrentIndex(0)
+        long=[{"role":"user","content":"q"},{"role":"assistant","content":"line\n\n"*200,"status":"complete"}]
+        w.current_chat["messages"]=long;t.follow_end();t.render(long);QTest.qWait(40)
+        bar.setValue(0);QTest.qWait(20)
+        with patch.object(w.engine,"generate"):
+            w.composer.setPlainText("next");w.model_combo.setCurrentIndex(0);w._send_chat();QTest.qWait(60)
+        self.assertGreaterEqual(bar.value(),bar.maximum()-6)
+
+    def test_messages_sit_close_together(self):
+        t=Transcript();t.resize(700,420);t.show();QTest.qWait(30)
+        t.render([{"role":"user","content":"Make me a workout plan"},{"role":"assistant","content":"Sure.","status":"complete","model_name":"Qwen"}])
+        QTest.qWait(30)
+        top=lambda text:t.cursorRect(t.document().find(text)).top()
+        gap=top("QWEN")-top("workout plan")                  # from the end of your message to the start of the reply
+        self.assertLess(gap,60)                              # it used to be roughly 100 pixels
+        self.assertGreater(gap,20)                           # but they are still clearly separate
+
+    def test_the_note_under_a_reply_reads_speed_then_tokens_then_time(self):
+        w=self.window
+        def finish(event,limit=160):
+            w.operation="chat"
+            w.current_chat["messages"]=[{"role":"user","content":"hi"},{"role":"assistant","content":"x","status":"generating","token_limit":limit}]
+            w._finished({"reason":"stop",**event});return w.current_chat["messages"][-1]["note"]
+        self.assertEqual(finish({"generated_tokens":612,"elapsed_seconds":14.3,"tokens_per_second":42.66}),"42.7 tok/s · 612 tokens · 14.3s")
+        self.assertEqual(finish({"generated_tokens":100,"elapsed_seconds":4.0}),"25.0 tok/s · 100 tokens · 4.0s")       # computed when the engine gives none
+        self.assertEqual(finish({"generated_tokens":1234,"elapsed_seconds":2.0,"tokens_per_second":None}),"617.0 tok/s · 1,234 tokens · 2.0s")
+        self.assertEqual(finish({"generated_tokens":5,"elapsed_seconds":0.0}),"5 tokens · 0.0s")                          # no speed to show
+        note=finish({"reason":"length","generated_tokens":50,"elapsed_seconds":2.0,"tokens_per_second":25.0})
+        self.assertTrue(note.startswith("25.0 tok/s · 50 tokens · 2.0s"),note)
+        self.assertEqual(w.current_chat["messages"][-1]["metrics"]["tokens_per_second"],25.0)
+
+    def test_the_composer_says_enter_to_send_and_asks_for_a_message(self):
+        w=self.window
+        self.assertEqual(w.composer.placeholderText(),"Enter a Message…")
+        self.assertEqual(w.chat_hint.text(),"Enter to send");self.assertNotIn("Shift",w.chat_hint.text())
+        w._display_chat();self.assertEqual(w.chat_hint.text(),"Enter to send")           # the hint is restored whenever a chat is shown
+
+    @staticmethod
+    def long_reply_stream(transcript,chunks,pause=8):
+        """Stream a long, structured answer into a view, redrawing after every chunk; returns frames spent away from the end."""
+        bar=transcript.verticalScrollBar();away=0
+        piece="## Section {n}\n\n1. Warm up for **five** minutes\n2. Main set:\n   - Squats: 3 x 12\n\n| Day | Focus |\n|-----|-------|\n| Mon | Legs |\n\n> [!TIP]\n> Drink water with $x^2$ effort.\n\n"
+        messages=[{"role":"user","content":"Plan"},{"role":"assistant","content":"","status":"generating"}]
+        for n in range(chunks):
+            messages[1]["content"]+=piece.format(n=n);transcript.render(messages);QTest.qWait(pause)
+            away+=bar.value()<bar.maximum()-6
+        QTest.qWait(250);return messages,away
+
+    def test_the_view_follows_a_long_reply_while_you_are_at_the_end(self):
+        t=Transcript();t.resize(700,420);t.show();QTest.qWait(30)
+        _messages,away=self.long_reply_stream(t,45)
+        bar=t.verticalScrollBar()
+        self.assertLessEqual(away,2)                                  # before the fix it was away from the end on ~9 frames in 10
+        self.assertGreaterEqual(bar.value(),bar.maximum()-6)
+
+    def test_the_view_stays_put_once_you_scroll_up_and_resumes_when_you_return_to_the_end(self):
+        t=Transcript();t.resize(700,420);t.show();QTest.qWait(30)
+        messages,_=self.long_reply_stream(t,20);bar=t.verticalScrollBar()
+        bar.setValue(0);QTest.qWait(20)
+        for _ in range(15):
+            messages[1]["content"]+="More text arriving.\n\n";t.render(messages);QTest.qWait(8)
+        QTest.qWait(150)
+        self.assertEqual(bar.value(),0)                               # not dragged along by new text
+        middle=bar.maximum()//2;bar.setValue(middle);QTest.qWait(20)
+        for _ in range(15):
+            messages[1]["content"]+="Even more text.\n\n";t.render(messages);QTest.qWait(8)
+        QTest.qWait(150)
+        self.assertEqual(bar.value(),middle)
+        bar.setValue(bar.maximum());QTest.qWait(20)                   # back to the end: following resumes
+        for _ in range(15):
+            messages[1]["content"]+="Final text.\n\n";t.render(messages);QTest.qWait(8)
+        QTest.qWait(250)
+        self.assertGreaterEqual(bar.value(),bar.maximum()-6)
+
+    def test_sending_a_message_and_opening_a_chat_jump_to_the_end(self):
+        t=Transcript();t.resize(700,420);t.show();QTest.qWait(30)
+        messages,_=self.long_reply_stream(t,20);bar=t.verticalScrollBar()
+        bar.setValue(0);QTest.qWait(20);t.render(messages);QTest.qWait(100);self.assertEqual(bar.value(),0)
+        t.follow_end();t.render(messages);QTest.qWait(250)
+        self.assertGreaterEqual(bar.value(),bar.maximum()-6)
+
+    def test_the_thinking_fold_renders_markdown_in_its_quiet_style(self):
+        w=self.window
+        thought="Plan:\n\n1. Compute the **discriminant** $b^2 - 4ac$\n2. Take the root\n\n> [!NOTE]\n> mind the sign"
+        w.transcript.render([{"role":"user","content":"q"},{"role":"assistant","content":"The answer","status":"complete","thinking":thought,
+                                "thinking_seconds":3.0,"thinking_open":True}])
+        plain=w.transcript.toPlainText()
+        for expected in ("Compute the discriminant","b² − 4ac","Take the root","Note","mind the sign"): self.assertIn(expected,plain)
+        for raw in ("**","$b^2","[!NOTE]","1. Compute"):
+            self.assertNotIn(raw,plain)                                # formatted, not raw text
+        self.assertIn(theme.COLORS["text_muted"],w.transcript.toHtml().lower())       # drawn in the muted thinking color
+
+    def test_popups_get_rounded_translucent_windows_and_every_drop_down_is_styled(self):
+        menu=QMenu();round_popup(menu)
+        self.assertTrue(menu.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
+        self.assertTrue(menu.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        combos=self.window.findChildren(QComboBox);self.assertGreater(len(combos),3)
+        for combo in combos:
+            popup=combo.view().window()
+            self.assertEqual(popup.objectName(),"comboPopup",combo.objectName() or combo.accessibleName())
+            self.assertTrue(popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
+        sheet=self.app.styleSheet()
+        for rule in ("QMenu::item:selected","QMenu {","combobox-popup: 0","QComboBox QAbstractItemView::item:hover","QComboBox QAbstractItemView::item:selected"):
+            self.assertIn(rule,sheet)
+
+    def test_the_dots_button_has_its_own_hover_state(self):
+        w=self.window;self.reply("one");w._new_chat();self.reply("two")
+        lst=w.chat_list;rect=lst.visualItemRect(lst.item(0));vp=lst.viewport();row=lst.row(lst.item(0))
+        QTest.mouseMove(vp,QPoint(rect.left()+20,rect.center().y()));self.assertEqual(lst.dots_row,-1)           # over the title: no dots hover
+        QTest.mouseMove(vp,QPoint(rect.right()-12,rect.center().y()))
+        self.assertEqual(lst.dots_row,row);self.assertEqual(vp.cursor().shape(),Qt.CursorShape.PointingHandCursor)
+        QTest.mouseMove(vp,QPoint(rect.left()+20,rect.center().y()))
+        self.assertEqual(lst.dots_row,-1);self.assertEqual(vp.cursor().shape(),Qt.CursorShape.ArrowCursor)
+        QTest.mouseMove(vp,QPoint(rect.right()-12,rect.center().y()));self.assertEqual(lst.dots_row,row)
+        lst.leaveEvent(QEvent(QEvent.Type.Leave))                                             # leaving the list clears it too
+        self.assertEqual(lst.dots_row,-1)
 
     def test_status_card_and_train_badge_follow_activity(self):
         w=self.window

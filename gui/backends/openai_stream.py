@@ -65,7 +65,7 @@ class ChatStream(QThread):
     def run(self):
         parts = urlsplit(self.url)
         factory = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
-        started, tokens, reason, usage_tokens, prompt_tokens = time.monotonic(), 0, "stop", None, None
+        started, tokens, reason, usage_tokens, prompt_tokens, speed = time.monotonic(), 0, "stop", None, None, None
         try:
             self._conn = conn = factory(parts.hostname, parts.port, timeout=self.timeout)
             path = parts.path + (f"?{parts.query}" if parts.query else "")
@@ -83,6 +83,8 @@ class ChatStream(QThread):
                 if data == "[DONE]": break
                 try: chunk = json.loads(data)
                 except ValueError: continue
+                if (chunk.get("timings") or {}).get("predicted_per_second"):
+                    speed = float(chunk["timings"]["predicted_per_second"])     # generation only, prompt processing excluded
                 if chunk.get("usage"):
                     usage_tokens = chunk["usage"].get("completion_tokens", usage_tokens)
                     prompt_tokens = chunk["usage"].get("prompt_tokens", prompt_tokens)
@@ -96,7 +98,8 @@ class ChatStream(QThread):
             if self._cancelled.is_set(): reason = "cancelled"
             self.done.emit({"reason": "length" if reason == "length" else reason if reason == "cancelled" else "stop",
                             "generated_tokens": usage_tokens if usage_tokens is not None else tokens,
-                            "elapsed_seconds": time.monotonic() - started, "prompt_tokens": prompt_tokens})
+                            "elapsed_seconds": time.monotonic() - started, "prompt_tokens": prompt_tokens,
+                            "tokens_per_second": speed})
         except (OSError, http.client.HTTPException) as error:
             if self._cancelled.is_set():
                 self.done.emit({"reason": "cancelled", "generated_tokens": tokens, "elapsed_seconds": time.monotonic() - started})

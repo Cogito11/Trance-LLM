@@ -6,7 +6,7 @@ import math
 
 from PySide6.QtCore import Qt, Signal, QRect, QRectF
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QListWidget, QPlainTextEdit, QStyle, QStyledItemDelegate, QTextBrowser, QWidget
+from PySide6.QtWidgets import QComboBox, QListWidget, QPlainTextEdit, QStyle, QStyledItemDelegate, QTextBrowser, QWidget
 
 from .markdown import to_html as to_markdown_html
 from .theme import STYLE, COLORS as C  # STYLE re-exported for existing imports
@@ -28,10 +28,15 @@ class ChatItemDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
         if self._marked(option):
+            hovered = getattr(option.widget, "dots_row", -1) == index.row()
+            area = QRect(option.rect.right() - self.DOTS, option.rect.top(), self.DOTS, option.rect.height())
             painter.save()
-            painter.setPen(QColor(C["text_muted"]))
-            painter.drawText(QRect(option.rect.right() - self.DOTS, option.rect.top(), self.DOTS, option.rect.height()),
-                             Qt.AlignmentFlag.AlignCenter, "\u22ef")
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            if hovered:                                   # the pointer is over the dots themselves: a small rounded button
+                button = QRect(area.center().x() - 11, area.center().y() - 11, 22, 22)
+                painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QColor(C["pressed"])); painter.drawRoundedRect(button, 6, 6)
+            painter.setPen(QColor(C["text"] if hovered else C["text_muted"]))
+            painter.drawText(area, Qt.AlignmentFlag.AlignCenter, "\u22ef")
             painter.restore()
 
 
@@ -40,6 +45,23 @@ class ConversationList(QListWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setItemDelegate(ChatItemDelegate(self))
+        self.dots_row = -1                      # the row whose ⋯ button the pointer is over, or -1
+
+    def _set_dots_row(self, row):
+        if row != self.dots_row:
+            self.dots_row = row
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor if row >= 0 else Qt.CursorShape.ArrowCursor)
+            self.viewport().update()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        position = event.position().toPoint(); item = self.itemAt(position)
+        over = item is not None and position.x() >= self.visualItemRect(item).right() - ChatItemDelegate.DOTS
+        self._set_dots_row(self.row(item) if over else -1)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._set_dots_row(-1)
 
     def mousePressEvent(self, event):
         # A context-menu action should not switch away from an unsent draft
@@ -108,6 +130,33 @@ class Transcript(QTextBrowser):
         self.setObjectName("transcript")
         self.setReadOnly(True)
         self.anchorClicked.connect(self._link_clicked)
+        # Scroll-follow: stay glued to the newest text while the reader is at the end, and leave the view alone once
+        # they scroll up. Qt lays a redrawn document out lazily, so the scroll range changes *after* setHtml returns;
+        # position is therefore decided by remembered intent (_stick) and re-applied whenever the range changes.
+        self._stick, self._programmatic, self._restore = True, False, None
+        bar = self.verticalScrollBar()
+        bar.valueChanged.connect(self._value_changed)
+        bar.rangeChanged.connect(self._range_changed)
+
+    def follow_end(self):
+        """Resume following the newest text (a new chat was opened, or a message was just sent)."""
+        self._stick, self._restore = True, None
+
+    def _value_changed(self, value):
+        if self._programmatic: return
+        self._restore = None                                   # the reader moved: forget any position we were holding for them
+        self._stick = value >= self.verticalScrollBar().maximum() - 6
+
+    def _range_changed(self, _low, high):
+        if self._programmatic: return
+        bar = self.verticalScrollBar()
+        self._programmatic = True
+        try:
+            if self._stick: bar.setValue(high)
+            elif self._restore is not None:
+                bar.setValue(min(self._restore, high))
+                if high >= self._restore: self._restore = None
+        finally: self._programmatic = False
 
     def restyle(self):
         """Redraw with the current theme colors (the HTML bakes them in)."""
@@ -134,37 +183,43 @@ class Transcript(QTextBrowser):
         title = "Thinking\u2026" if waiting else (f"Thought for {seconds:.0f} s" if seconds and seconds >= 1 else "Thoughts")
         muted = C["text_muted"]
         arrow = "\u25be" if opened else "\u25b8"
-        escaped = html.escape(thinking).replace(chr(10), "<br>")
         head = (f'<p style="font-size:12px;margin-top:0px;margin-bottom:2px"><a href="think:{index}" style="color:{muted};text-decoration:none">'
                 f'{arrow} {title}</a></p>')
-        body = (f'<p style="color:{muted};font-size:12px;margin-left:14px;margin-top:2px;line-height:140%"><i>{escaped}</i></p>') if opened else ""
-        return head + body
+        if not opened: return head
+        return head + to_markdown_html(thinking, "thinking") + '<p style="margin-top:0px;margin-bottom:0px;font-size:8px">&nbsp;</p>'
 
     def render(self, messages: list[dict], empty_title="", empty_text=""):
         self._last = (messages, empty_title, empty_text)
         bar = self.verticalScrollBar()
-        at_bottom = bar.value() >= bar.maximum()-24
-        scroll = bar.value()
+        target = self._restore if self._restore is not None else bar.value()      # where the reader was, before this redraw
         if not messages:
             body = f'<h2 style="color:{C["text"]}">{html.escape(empty_title)}</h2><p style="color:{C["text_muted"]}">{html.escape(empty_text)}</p>' if empty_title or empty_text else ""
         else:
-            blocks = []
+            blocks, muted = [], C["text_muted"]
             for index, m in enumerate(messages):
                 user = m["role"] == "user"
                 role = "You" if user else (m.get("model_name") or "Trance")
                 color = C["text_subtle"] if user else C["accent"]
                 content = m.get("content", "")
-                if user: text = f'<p style="color:{C["text"]};line-height:150%">{html.escape(content).replace(chr(10), "<br>")}</p>'
+                if user: text = f'<p style="color:{C["text"]};line-height:150%;margin-top:0px;margin-bottom:0px">{html.escape(content).replace(chr(10), "<br>")}</p>'
                 elif content.strip(): text = to_markdown_html(content)
-                elif m.get("status") == "generating": text = "" if m.get("thinking") else f'<p style="color:{C["text_muted"]}">Generating\u2026</p>'
-                else: text = f'<p style="color:{C["text_muted"]}">No response text.</p>'
+                elif m.get("status") == "generating": text = "" if m.get("thinking") else f'<p style="color:{muted};margin-top:0px;margin-bottom:0px">Generating\u2026</p>'
+                else: text = f'<p style="color:{muted};margin-top:0px;margin-bottom:0px">No response text.</p>'
                 note = html.escape(m.get("note", ""))
-                blocks.append(f'<p style="color:{color};font-size:12px"><b>{html.escape(role.upper())}</b></p>'
-                              + ("" if user else self._thinking_html(index, m)) + text
-                              + f'<p style="color:{C["text_muted"]};font-size:11px">{note}</p><br>')
+                note_html = f'<p style="color:{muted};font-size:11px;margin-top:2px;margin-bottom:0px">{note}</p>' if note else ""
+                blocks.append(f'<p style="color:{color};font-size:12px;margin-top:0px;margin-bottom:4px"><b>{html.escape(role.upper())}</b></p>'
+                              + ("" if user else self._thinking_html(index, m)) + text + note_html
+                              + '<p style="margin-top:0px;margin-bottom:0px;font-size:18px">&nbsp;</p>')     # the gap between messages
             body = "".join(blocks)
-        self.setHtml('<html><body style="font-family:DejaVu Sans;font-size:14px;margin:24px">' + body + '</body></html>')
-        bar.setValue(bar.maximum() if at_bottom else scroll)
+        self._programmatic = True
+        try:
+            self.setHtml('<html><body style="font-family:DejaVu Sans;font-size:14px;margin:24px">' + body + '</body></html>')
+            if self._stick:
+                bar.setValue(bar.maximum()); self._restore = None
+            else:
+                bar.setValue(min(target, bar.maximum()))
+                self._restore = target if target > bar.maximum() else None            # layout is not finished yet: finish restoring later
+        finally: self._programmatic = False
 
 
 class LossChart(QWidget):
@@ -225,3 +280,21 @@ def dot_icon(color, size=10):
     painter.setPen(Qt.PenStyle.NoPen); painter.setBrush(QColor(color)); painter.drawEllipse(1, 1, size - 2, size - 2)
     painter.end()
     return QIcon(pixmap)
+
+
+def round_popup(popup):
+    """Give a popup (a menu or a combo list) real rounded corners.
+
+    The style sheet can round the *drawing*, but the popup window itself is rectangular; making it frameless and
+    transparent lets the corners show what is behind them. (Without a compositing window manager the corners
+    can look square or dark; nothing breaks.)
+    """
+    popup.setWindowFlags(popup.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+    popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+
+def style_combo_popup(combo: QComboBox):
+    """Polished drop-down list: rounded, padded rows with hover and selection effects (see theme.py)."""
+    popup = combo.view().window()
+    popup.setObjectName("comboPopup")
+    round_popup(popup)

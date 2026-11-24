@@ -110,7 +110,11 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends squashfs-tools libxcb-cursor0
+          # squashfs-tools builds the image. The X11/xkb libraries are bundled into the AppImage, so they must be
+          # present here. libgl1 and libegl1 are NOT bundled (they come from the user's graphics stack) but Qt
+          # cannot even be imported without them, so the verify step below needs them on this runner.
+          sudo apt-get install -y --no-install-recommends squashfs-tools libgl1 libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 \
+            libxcb-shape0 libxcb-xkb1 libxcb-keysyms1 libxcb-icccm4 libxkbcommon-x11-0 libxcb-cursor0 libxcb-image0 libxcb-render-util0 libxcb-util1
           python3 -m venv .venv-packaging
           .venv-packaging/bin/python -m pip install --disable-pip-version-check -r packaging/requirements.txt
           .venv-packaging/bin/python tools/download_appimage_tools.py
@@ -199,6 +203,10 @@ jobs:
             **Windows** (`trance-windows-x86_64.zip`): `trance.exe` with the
             cuBLAS DLLs, plus the same three folders. The CUDA Toolkit is not
             required.
+
+            The desktop app needs the system graphics libraries `libGL`
+            and `libEGL`, present on any desktop; on a minimal install:
+            `sudo apt install libgl1 libegl1`.
 
             Both need an NVIDIA GPU with a current driver. Extract a model
             bundle into `models/` to use it. This pre-release is overwritten

@@ -57,7 +57,7 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(self.delay)
                 self._chunk('data: ' + json.dumps({"choices": [{"delta": {"content": self.pieces[n % len(self.pieces)]}}]}) + "\n\n")
             self._chunk('data: ' + json.dumps({"choices": [{"delta": {}, "finish_reason": reason}]}) + "\n\n")
-            self._chunk('data: ' + json.dumps({"choices": [], "usage": {"completion_tokens": count}}) + "\n\n")
+            self._chunk('data: ' + json.dumps({"choices": [], "usage": {"completion_tokens": count}, "timings": {"predicted_per_second": 123.4}}) + "\n\n")
             self._chunk("data: [DONE]\n\n"); self.wfile.write(b"0\r\n\r\n")
         except (BrokenPipeError, ConnectionResetError):
             pass

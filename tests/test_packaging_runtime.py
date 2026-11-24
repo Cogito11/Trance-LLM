@@ -79,6 +79,38 @@ class ReleaseLayoutTests(unittest.TestCase):
             self.assertIsNone(script.find_cublas("libdoesnotexist.so.1",{"CUDA_PATH":str(toolkit)}))
             self.assertEqual(script.cublas_search_dirs({})[-1],Path("/lib/x86_64-linux-gnu"))          # the old Ubuntu location is still a fallback
 
+    def test_a_missing_graphics_library_is_explained_in_plain_words(self):
+        message=bootstrap.explain_startup_error(ImportError("libGL.so.1: cannot open shared object file: No such file or directory"))
+        self.assertIn("libGL.so.1",message);self.assertIn("sudo apt install libgl1",message);self.assertNotIn("Traceback",message)
+        self.assertIn("libegl1",bootstrap.explain_startup_error(ImportError("libEGL.so.1: cannot open shared object file: No such file")))
+        self.assertIn("libxkbcommon-x11-0",bootstrap.explain_startup_error(ImportError("libxkbcommon-x11.so.0: cannot open shared object file")))
+        generic=bootstrap.explain_startup_error(ImportError("libfancy.so.3: cannot open shared object file: No such file"))
+        self.assertIn("libfancy.so.3",generic);self.assertIn("package manager",generic)
+        self.assertIsNone(bootstrap.explain_startup_error(ImportError("No module named 'nothing'")))   # real bugs are not disguised
+
+    def test_the_build_refuses_to_bundle_without_the_x11_libraries(self):
+        script=self.build_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            internal=Path(tmp)
+            self.assertEqual(script.missing_bundled_libs(internal),list(script.REQUIRED_BUNDLED_LIBS))
+            for name in script.REQUIRED_BUNDLED_LIBS: (internal/name).write_text("x")
+            self.assertEqual(script.missing_bundled_libs(internal),[])
+            (internal/"libxcb-shape.so.0").unlink()
+            self.assertEqual(script.missing_bundled_libs(internal),["libxcb-shape.so.0"])
+        for needed in ("libxcb-shape0","libxkbcommon-x11-0","libxcb-cursor0"): self.assertIn(needed,script.BUILD_PACKAGES)
+
+    def test_verify_shows_what_a_failing_command_said(self):
+        spec=importlib.util.spec_from_file_location("verify_under_test",Path(runtime.PROJECT)/"tools"/"verify_appimage.py")
+        module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        ok=module.run_checked([sys.executable,"-c","print('fine')"])
+        self.assertEqual(ok.stdout.strip(),"fine")
+        import io, contextlib
+        captured=io.StringIO()
+        with contextlib.redirect_stderr(captured), self.assertRaises(SystemExit):
+            module.run_checked([sys.executable,"-c","import sys;print('the stdout');print('ImportError: libGL.so.1',file=sys.stderr);sys.exit(3)"])
+        report=captured.getvalue()
+        for expected in ("exit code 3","the stdout","ImportError: libGL.so.1"): self.assertIn(expected,report)
+
     def test_cublas_license_text_is_collected_from_packages_or_the_toolkit(self):
         script=self.build_script()
         with tempfile.TemporaryDirectory() as tmp:

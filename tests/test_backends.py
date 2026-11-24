@@ -82,6 +82,7 @@ class ChatStreamTests(AppCase):
         done = rec.payload("done")
         self.assertEqual((done["reason"], done["generated_tokens"]), ("stop", 6))
         self.assertIsNone(done["prompt_tokens"])
+        self.assertEqual(done["tokens_per_second"], 123.4)         # the server's own generation speed, prompt processing excluded
         sent = self.server.RequestHandlerClass.seen[0]
         self.assertEqual(sent["headers"]["Authorization"], "Bearer secret")
         body = sent["body"]

@@ -24,7 +24,7 @@ from .runtimes import RuntimeManager
 from . import APP_NAME
 from .storage import ROOT, STATE, atomic_json, read_json, new_chat, completed_context, discover_models, model_info, validate_config
 from .training import EventTail, latest_run, launch_training, stop_training, run_alive, recent_runs
-from .widgets import Composer, Transcript, LossChart, ConversationList, dot_icon, STYLE
+from .widgets import Composer, Transcript, LossChart, ConversationList, dot_icon, round_popup, style_combo_popup, STYLE
 from . import theme
 from .config_builder import ConfigBuilder, parameter_count
 from .settings import SettingsPage
@@ -147,6 +147,7 @@ class MainWindow(QMainWindow):
         previous = latest_run()
         if previous:
             self._attach_training(previous)
+        for combo in self.findChildren(QComboBox): style_combo_popup(combo)    # every drop-down list gets the same polish
         self._show_page(0)
         self._update_status()
         self.statusBar().clearMessage()
@@ -313,7 +314,7 @@ class MainWindow(QMainWindow):
         self.chat_content.addWidget(welcome); box.addWidget(self.chat_content,1)
         self.composer_panel = QFrame(); self.composer_panel.setObjectName("composerPanel")
         panel = QVBoxLayout(self.composer_panel); panel.setContentsMargins(12,10,12,10); panel.setSpacing(6)
-        self.composer = Composer(auto_size=True); self.composer.setObjectName("messageInput"); self.composer.setPlaceholderText("Message Trance…")
+        self.composer = Composer(auto_size=True); self.composer.setObjectName("messageInput"); self.composer.setPlaceholderText("Enter a Message…")
         self.composer.submitted.connect(self._send_chat); panel.addWidget(self.composer)
         self.response_controls = QWidget(); self.response_controls.setObjectName("responseControls")
         actions = QHBoxLayout(self.response_controls); actions.setContentsMargins(0,0,0,0); actions.setSpacing(6)
@@ -324,7 +325,7 @@ class MainWindow(QMainWindow):
         self.think_button = QPushButton("Think"); self.think_button.setObjectName("thinkToggle"); self.think_button.setCheckable(True)
         self.think_button.setCursor(Qt.CursorShape.PointingHandCursor); self.think_button.setChecked(self.preferences.get("thinking",False) is True)
         self.think_button.toggled.connect(lambda _on: self._save_preferences()); self._think_cache = {}
-        self.chat_hint = label("Enter to send · Shift+Enter for a new line","composerHint"); self.chat_hint.setWordWrap(True)
+        self.chat_hint = label("Enter to send","composerHint"); self.chat_hint.setWordWrap(True)
         footer.addWidget(self.think_button); footer.addWidget(self.chat_hint,1); footer.addWidget(self.response_controls); panel.addLayout(footer)
         self.suggestion_row = QWidget(); self.suggestion_row.setObjectName("sidebarPanel")
         row = QHBoxLayout(self.suggestion_row); row.setContentsMargins(0,0,0,0); row.setSpacing(8)
@@ -425,7 +426,7 @@ class MainWindow(QMainWindow):
             index = combo.findData(previous)
             if index < 1 and combo is not self.compare_b and self.models: index = 1
             combo.setCurrentIndex(max(0,index)); combo.blockSignals(False)
-            combo.view().setMinimumWidth(combo.view().sizeHintForColumn(0) + 40)   # the closed box is narrow; the list shows full names
+            combo.view().setMinimumWidth(combo.view().sizeHintForColumn(0) + 84)   # the closed box is narrow; the list shows full names
         self._model_changed()
 
     def _browse_model(self):
@@ -615,9 +616,10 @@ class MainWindow(QMainWindow):
 
     def _display_chat(self):
         self._refresh_chats(); self.composer.clear()
+        self.transcript.follow_end()                  # opening a chat shows its latest messages
         self.transcript.render(self.current_chat.get("messages",[]))
         self._show_chat_content()
-        self.chat_hint.setText("Enter to send · Shift+Enter for a new line")
+        self.chat_hint.setText("Enter to send")
         self._show_page(0)
 
     def _show_chat_content(self):
@@ -692,7 +694,7 @@ class MainWindow(QMainWindow):
         item = self.chat_list.itemAt(position)
         if item is None: return
         chat_id = item.data(Qt.ItemDataRole.UserRole)
-        menu = QMenu(self.chat_list)
+        menu = QMenu(self.chat_list); round_popup(menu)
         rename = menu.addAction("Rename chat…")
         delete = menu.addAction("Delete chat")
         action = menu.exec(self.chat_list.viewport().mapToGlobal(position))
@@ -782,7 +784,7 @@ class MainWindow(QMainWindow):
         self._refresh_chats(); self._save_chats(); self.composer.clear(); self.operation="chat"
         self._show_page(0)
         self._show_chat_content()
-        self.transcript.render(self.current_chat["messages"]); self._set_busy(True)
+        self.transcript.follow_end(); self.transcript.render(self.current_chat["messages"]); self._set_busy(True)   # sending jumps to the reply
         self.engine.generate(model,context+[{"role":"user","content":text}],settings)
 
     def _start_compare(self):
@@ -852,12 +854,13 @@ class MainWindow(QMainWindow):
         if message is None: return
         reason=event.get("reason"); message["status"]="cancelled" if reason=="cancelled" else "complete"
         tokens=event.get("generated_tokens",0); elapsed=event.get("elapsed_seconds",0)
-        message["metrics"]={"generated_tokens":tokens,"elapsed_seconds":elapsed,"reason":reason}
+        speed=event.get("tokens_per_second") or (tokens/elapsed if elapsed>0 and tokens>0 else None)
+        message["metrics"]={"generated_tokens":tokens,"elapsed_seconds":elapsed,"reason":reason,"tokens_per_second":speed}
         if message.get("thinking") and "thinking_seconds" not in message: message["thinking_seconds"]=round(time.monotonic()-self._think_started,1)
         if event.get("prompt_tokens") is not None and event.get("context_length"):
             message["prompt_tokens"]=event["prompt_tokens"]
             if self.operation=="chat": self.chat_hint.setText(f"Context: {event['prompt_tokens']+tokens:,}/{event['context_length']:,} tokens")
-        message["note"]=f"{tokens} tokens · {elapsed:.1f}s" + (" · stopped" if reason=="cancelled" else (" · response limit reached" if message.get("token_limit") else " · context window full") if reason=="length" else "")
+        message["note"]=(f"{speed:,.1f} tok/s · " if speed else "")+f"{tokens:,} tokens · {elapsed:.1f}s" + (" · stopped" if reason=="cancelled" else (" · response limit reached" if message.get("token_limit") else " · context window full") if reason=="length" else "")
         self._render_active()
         if self.operation=="chat": self._save_chats()
         elif self.compare_index==0 and not self.compare_cancelled and reason!="cancelled":
