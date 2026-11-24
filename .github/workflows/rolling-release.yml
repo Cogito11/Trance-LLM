@@ -32,7 +32,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned to ubuntu-24.04 (not ubuntu-latest): ubuntu-latest now points
+          # at 26.04, and Jimver/cuda-toolkit builds the NVIDIA apt repo URL from
+          # the runner's Ubuntu version. NVIDIA's ubuntu2604 repo has no CUDA
+          # 12.6 packages, so the install fails with "Unable to locate package
+          # cuda-nvcc-12-6". 24.04 has them, and also matches the glibc the
+          # AppImage is built and tested against (see packaging/README.md).
+          - os: ubuntu-24.04
             output_name: trance
             asset_name: trance-linux-x86_64
             cuda_sub_packages: '["nvcc","cudart"]'
