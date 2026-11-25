@@ -1,4 +1,4 @@
-"""Settings page: currently the color theme."""
+"""Settings page: the color theme, the model loaded at launch, and the llama.cpp runtimes."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -161,8 +161,37 @@ class RuntimeCard(QFrame):
         else: self.manager.remove_install(key)
 
 
+class DefaultModelCard(QFrame):
+    """Choose the model that loads by itself when the app starts."""
+    selected = Signal(str)                      # a model path, or "" for none
+    NONE = "None  \u00b7  start with no model loaded"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("settingsCard")
+        box = QVBoxLayout(self); box.setContentsMargins(18, 16, 18, 16); box.setSpacing(10)
+        title = QLabel("Default model"); title.setObjectName("themeName"); box.addWidget(title)
+        blurb = QLabel("Loaded automatically each time the app starts, so it is ready to chat straight away. "
+                       "A loaded model uses memory (GPU memory for most models); choose None to start empty and pick one yourself.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True); box.addWidget(blurb)
+        self.combo = QComboBox(); self.combo.setAccessibleName("Default model"); box.addWidget(self.combo)
+        self.combo.activated.connect(lambda _index: self.selected.emit(self.combo.currentData() or ""))
+
+    def set_models(self, models: list[tuple[str, str]], selected: str = ""):
+        """`models` is a list of (path, label). A saved default whose file has gone is still shown, so merely opening
+        Settings never forgets it."""
+        self.combo.blockSignals(True); self.combo.clear()
+        self.combo.addItem(self.NONE, "")
+        for path, text in models: self.combo.addItem(text, path)
+        if selected and self.combo.findData(selected) < 0:
+            self.combo.addItem(f"{Path(selected).name}  \u00b7  not found", selected)
+        self.combo.setCurrentIndex(max(0, self.combo.findData(selected)))
+        self.combo.blockSignals(False)
+
+
 class SettingsPage(QWidget):
     theme_selected = Signal(str)
+    default_model_selected = Signal(str)
 
     def __init__(self, current: str = "teal", parent=None, *, runtimes=None):
         super().__init__(parent)
@@ -180,12 +209,19 @@ class SettingsPage(QWidget):
             card = ThemeCard(name); self.group.addButton(card); self.cards[name] = card; row.addWidget(card, 1)
             card.clicked.connect(lambda checked=False, n=name: self.theme_selected.emit(n))
         layout.addLayout(row)
+        heading = QLabel("MODELS"); heading.setObjectName("eyebrow"); layout.addSpacing(8); layout.addWidget(heading)
+        self.default_model_card = DefaultModelCard(); layout.addWidget(self.default_model_card)
+        self.default_model_card.selected.connect(self.default_model_selected)
         self.runtime_card = None
         if runtimes is not None:
             heading = QLabel("RUNTIMES"); heading.setObjectName("eyebrow"); layout.addSpacing(8); layout.addWidget(heading)
             self.runtime_card = RuntimeCard(runtimes); layout.addWidget(self.runtime_card)
         layout.addStretch(1)
         self.select(current)
+
+    def set_models(self, models: list[tuple[str, str]], default: str = ""):
+        """Refresh the models offered as the launch default."""
+        self.default_model_card.set_models(models, default)
 
     def select(self, name: str):
         """Mark a theme as current without emitting theme_selected."""

@@ -107,7 +107,6 @@ QScrollArea#generationScroll {{ background: transparent; border: none; }}
 QScrollArea#formScroll {{ background: transparent; border: none; }}
 QWidget#generationContent {{ background: {surface}; }}
 QFrame#composerPanel {{ background: {surface}; border: 1px solid {border_strong}; border-radius: 12px; }}
-QFrame#modelControls {{ background: {surface}; border: 1px solid {border_strong}; border-radius: 10px; }}
 QWidget#responseControls {{ background: transparent; }}
 QPlainTextEdit#messageInput {{ background: transparent; border: none; padding: 4px; }}
 QPushButton {{ background: {raised}; border: 1px solid {border_strong}; padding: 10px 16px; border-radius: 7px; }}
@@ -121,6 +120,19 @@ QPushButton#nav {{ text-align: left; background: transparent; border: none; bord
 QPushButton#nav:hover {{ background: {hover}; color: {text}; }}
 QPushButton#nav:checked {{ background: {accent_wash}; color: {accent}; border-left: 3px solid {accent}; font-weight: 600; }}
 QPushButton[compact="true"] {{ padding: 8px 10px; font-size: 12px; }}
+QPushButton#dropdown {{ background: {control}; border: 1px solid {border_strong}; border-radius: 8px; padding: 0px; text-align: left; }}
+QPushButton#dropdown:hover {{ background: {hover}; border-color: {border_hover}; }}
+QPushButton#dropdown:pressed {{ background: {pressed}; }}
+QPushButton#dropdown:focus {{ border-color: {accent}; }}
+QPushButton#dropdown:disabled {{ background: {control}; border-color: {border}; }}
+QPushButton#menuButton {{ padding: 0px; font-size: 20px; font-weight: 700; color: {text_subtle}; }}
+QPushButton#menuButton:hover {{ color: {text}; }}
+QPushButton#iconButton {{ background: transparent; border: none; border-radius: 7px; padding: 0px; color: {text_muted}; font-size: 14px; }}
+QPushButton#iconButton:hover {{ background: {hover}; color: {text}; }}
+QFrame#modalOverlay {{ background: rgba(3, 6, 12, 0.68); border: none; }}
+QFrame#modalCard {{ background: {surface}; border: 1px solid {border_strong}; border-radius: 14px; }}
+QLabel#modalTitle {{ font-size: 17px; font-weight: 700; }}
+QListWidget#modelList::item {{ padding: 0px; }}
 QComboBox, QSpinBox, QDoubleSpinBox {{ background: {control}; border: 1px solid {border_strong}; border-radius: 6px; padding: 8px; }}
 QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {{ border-color: {accent}; }}
 QLineEdit {{ background: {control}; border: 1px solid {border_strong}; border-radius: 6px; padding: 8px; }}

@@ -61,7 +61,7 @@ Rebuild `trance` from the current source first if your binary predates the deskt
 
 The portable Linux AppImage bundles Python, Qt, the native engine and cuBLAS. It uses your existing project folder for models, configs and data. See [packaging/README.md](packaging/README.md) for launch and build instructions.
 
-Rebuild and verify the AppImage with `./tools/build_release.sh`. Add `--compile-engine` to compile the CUDA engine into a separate build directory first. The sidebar has a Chat / Train / Tools switcher, with the matching list below it. Temporary chats remain in memory; saved chats are listed in full and are searchable. Use the ⋯ button or right-click a saved conversation to rename or delete it.
+Rebuild and verify the AppImage with `./tools/build_release.sh`. Add `--compile-engine` to compile the CUDA engine into a separate build directory first. The sidebar has a Chat / Train / Tools switcher, with the matching list below it. Temporary chats remain in memory; saved chats are listed in full and are searchable. Use the ⋯ button or right-click a saved conversation for Rename, Export and Delete (the ⋯ at the top of a chat shows the same menu; temporary chats also have a Save Chat button). Pick a model from the button at the top of the chat to load it, and choose a default model in Settings to load one at launch.
 
 ### 1. Interactive Console (REPL)
 Run without any arguments to open the interactive REPL shell:

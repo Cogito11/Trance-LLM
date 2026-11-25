@@ -5,12 +5,13 @@ import argparse
 from datetime import datetime
 import json
 import random
+import re
 from pathlib import Path
 import time
 import uuid
 import tempfile
 
-from PySide6.QtCore import Qt, QTimer, QLockFile
+from PySide6.QtCore import Qt, QTimer, QLockFile, QPoint
 from PySide6.QtGui import QFont, QDesktopServices, QIcon
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QFrame,
@@ -18,13 +19,15 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
     QSpinBox, QScrollArea, QFileDialog, QPlainTextEdit, QProgressBar, QSplitter, QMessageBox,
     QMenu, QInputDialog, QLineEdit, QListWidget, QGridLayout)
 
+from .backends.llama_server import NO_RUNTIME
 from .backends.router import BackendRouter, backend_kind
 from .gguf import discover_gguf, read_chat_template, read_gguf_info, supports_thinking
 from .runtimes import RuntimeManager
 from . import APP_NAME
 from .storage import ROOT, STATE, atomic_json, read_json, new_chat, completed_context, discover_models, model_info, validate_config
 from .training import EventTail, latest_run, launch_training, stop_training, run_alive, recent_runs
-from .widgets import Composer, Transcript, LossChart, ConversationList, dot_icon, round_popup, style_combo_popup, STYLE
+from .widgets import Composer, Transcript, LossChart, ConversationList, DropdownButton, dot_icon, round_popup, style_combo_popup, STYLE
+from .model_picker import ModelPicker
 from . import theme
 from .config_builder import ConfigBuilder, parameter_count
 from .settings import SettingsPage
@@ -38,6 +41,7 @@ def label(text, name=None):
     return widget
 
 
+MODEL_CONTROLS_WIDTH, EJECT_WIDTH = 280, 64          # the centered model group never changes size
 GREETINGS = ("Welcome", "What\u2019s up next?", "What are we making today?", "Ready when you are", "What\u2019s on your mind?",
              "Let\u2019s get started", "What shall we explore?", "Good to see you")
 SUGGESTIONS = ("Write a fantasy story", "Explain how black holes work", "Make me an email template", "Plan a trip to Rome",
@@ -86,7 +90,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(str(Path(__file__).parent/"assets/trance.svg")))
         self.resize(1300, 860)
-        self.setMinimumSize(1000, 690)
+        self.setMinimumSize(1240, 690)      # the chat header (title, centered model controls, Save Chat, ⋯) needs this much room
         self.statusBar().hide()
         self.statusBar().messageChanged.connect(lambda message: self.statusBar().setVisible(bool(message) and message != "Ready"))
         self.state_dir = Path(state_dir or STATE)
@@ -120,6 +124,7 @@ class MainWindow(QMainWindow):
         self._render_timer.timeout.connect(self._render_active)
         self._engine_error = False
         self._closing = False
+        self._loading_model = ""        # the model being loaded right now, or ""
         self.models = []
         self.runtimes = RuntimeManager(self.state_dir, lambda: self.preferences.get("llama_server_path", ""), self._set_llama_path, self,
                                        get_active=lambda: self.preferences.get("llama_runtime", ""), set_active=self._set_llama_runtime)
@@ -151,6 +156,7 @@ class MainWindow(QMainWindow):
         self._show_page(0)
         self._update_status()
         self.statusBar().clearMessage()
+        if self.preferences.get("default_model"): QTimer.singleShot(0, self._load_default_model)
 
     def _read_state(self, filename, default):
         path = self.state_dir / filename
@@ -240,6 +246,7 @@ class MainWindow(QMainWindow):
         self.documentation=Documentation();self.pages.addWidget(self.documentation)
         self.settings_page = SettingsPage(self._theme_name, runtimes=self.runtimes); self.pages.addWidget(self.settings_page)
         self.settings_page.theme_selected.connect(self._set_theme)
+        self.settings_page.default_model_selected.connect(self._set_default_model)
         self.settings = QFrame(); self.settings.setObjectName("settings"); self.settings.setFixedWidth(264)
         outer = QVBoxLayout(self.settings); outer.setContentsMargins(0,0,0,0)
         scroll = QScrollArea(); scroll.setObjectName("generationScroll"); scroll.setWidgetResizable(True)
@@ -282,20 +289,37 @@ class MainWindow(QMainWindow):
     def _build_chat(self):
         page = QWidget(); box = QVBoxLayout(page); box.setContentsMargins(30,28,30,24); box.setSpacing(16)
         self.pages.addWidget(page)
-        header = QHBoxLayout(); self.chat_title = label("New Chat","title"); header.addWidget(self.chat_title); header.addStretch()
-        self.chat_export_button = button("Export chat…",self._export_chat); header.addWidget(self.chat_export_button); box.addLayout(header)
-        self.model_controls = QFrame(); self.model_controls.setObjectName("modelControls")
-        models = QHBoxLayout(self.model_controls); models.setContentsMargins(8,8,8,8); models.setSpacing(6)
-        self.model_combo = QComboBox(); self.model_combo.setMinimumWidth(210); self.model_combo.setMaximumWidth(300)
-        self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.model_combo.setMinimumContentsLength(12); self.model_combo.currentIndexChanged.connect(self._model_changed)
-        self.browse_model_button = button("Browse…",self._browse_model)
-        self.refresh_model_button = button("↻",self.refresh_models); self.refresh_model_button.setFixedWidth(34)
-        self.refresh_model_button.setToolTip("Refresh the model list"); self.refresh_model_button.setAccessibleName("Refresh models")
-        self.eject_button = button("Eject",self._eject_model); self.eject_button.setEnabled(False)
+        # Three columns: the heading on the left, the model controls centered in the bar, the chat actions on the right.
+        # The outer columns share the spare room equally, which is what keeps the middle one centered.
+        header = QGridLayout(); header.setHorizontalSpacing(10); header.setContentsMargins(0,0,0,0)
+        header.setColumnStretch(0,1); header.setColumnStretch(2,1)
+        self.chat_title = label("New Chat","title"); header.addWidget(self.chat_title,0,0,Qt.AlignmentFlag.AlignLeft)
+        # One drop-down button opens the model picker; Eject sits beside it once a model is loaded. The group is always
+        # the same width: with nothing loaded the button takes the room Eject will use.
+        self.model_controls = QWidget(); self.model_controls.setObjectName("sidebarPanel"); self.model_controls.setFixedWidth(MODEL_CONTROLS_WIDTH)
+        models = QHBoxLayout(self.model_controls); models.setContentsMargins(0,0,0,0); models.setSpacing(6)
+        self.model_button = DropdownButton(); self.model_button.clicked.connect(self._open_model_picker)
+        self.eject_button = button("Eject",self._eject_model)
         self.eject_button.setToolTip("Unload the model and free its memory"); self.eject_button.setAccessibleName("Eject model")
-        models.addWidget(self.model_combo,1); models.addWidget(self.browse_model_button); models.addWidget(self.refresh_model_button); models.addWidget(self.eject_button)
-        floating = QHBoxLayout(); floating.addStretch(); floating.addWidget(self.model_controls); floating.addStretch(); box.addLayout(floating)
+        self.eject_button.setVisible(False); self.eject_button.setFixedWidth(EJECT_WIDTH)
+        models.addWidget(self.model_button,1); models.addWidget(self.eject_button)
+        header.addWidget(self.model_controls,0,1,Qt.AlignmentFlag.AlignCenter)
+        # Chat actions, top right: Save Chat (temporary chats only) and the ⋯ menu (Rename, Export, Delete).
+        self.save_chat_button = button("Save Chat",self._save_temporary_chat)
+        self.save_chat_button.setToolTip("Keep this temporary chat: it becomes a normal chat in the sidebar"); self.save_chat_button.setVisible(False)
+        self.chat_menu_button = button("\u22ef",self._open_chat_menu); self.chat_menu_button.setObjectName("menuButton")
+        self.chat_menu_button.setFixedWidth(42); self.chat_menu_button.setToolTip("Chat options"); self.chat_menu_button.setAccessibleName("Chat options")
+        self.chat_menu_button.setCursor(Qt.CursorShape.PointingHandCursor); self.chat_menu_button.setVisible(False)
+        for widget in (self.eject_button,self.save_chat_button,self.chat_menu_button): widget.setFixedHeight(38)
+        actions = QHBoxLayout(); actions.setSpacing(10); actions.setContentsMargins(0,0,0,0)
+        actions.addWidget(self.save_chat_button); actions.addWidget(self.chat_menu_button)
+        header.addLayout(actions,0,2,Qt.AlignmentFlag.AlignRight); box.addLayout(header)
+        self.model_picker = ModelPicker(self); self.model_picker.setGeometry(self.rect())
+        self.model_picker.picked.connect(self._load_model)
+        self.model_picker.eject_requested.connect(self._eject_model)
+        self.model_picker.browse_requested.connect(self._browse_model)
+        self.model_picker.refresh_requested.connect(self.refresh_models)
+        self.model_picker.closed.connect(self._picker_closed)
         self.chat_content = QStackedWidget()
         self.transcript = Transcript(); self.chat_content.addWidget(self.transcript)
         temporary_empty = QWidget(); center = QVBoxLayout(temporary_empty); center.setContentsMargins(20,20,20,20)
@@ -320,7 +344,7 @@ class MainWindow(QMainWindow):
         actions = QHBoxLayout(self.response_controls); actions.setContentsMargins(0,0,0,0); actions.setSpacing(6)
         self.stop_button = button("Stop response",self._stop); self.stop_button.setEnabled(False); actions.addWidget(self.stop_button)
         self.send_button = button("Send message",self._send_chat,True); actions.addWidget(self.send_button)
-        for widget in (self.browse_model_button,self.refresh_model_button,self.eject_button,self.stop_button,self.send_button): widget.setProperty("compact",True)
+        for widget in (self.eject_button,self.stop_button,self.send_button): widget.setProperty("compact",True)
         footer = QHBoxLayout(); footer.setSpacing(10)
         self.think_button = QPushButton("Think"); self.think_button.setObjectName("thinkToggle"); self.think_button.setCheckable(True)
         self.think_button.setCursor(Qt.CursorShape.PointingHandCursor); self.think_button.setChecked(self.preferences.get("thinking",False) is True)
@@ -406,6 +430,14 @@ class MainWindow(QMainWindow):
         self.temporary_chat_button.setChecked(index==0 and temporary)
         self.new_chat_button.setChecked(index==0 and not temporary and new)
         self.chat_title.setText("Temporary Chat" if temporary else "New Chat" if new else "Chat")
+        self._update_chat_actions()
+
+    def _update_chat_actions(self):
+        """The ⋯ menu and Save Chat only make sense once a chat has messages; Save Chat only for temporary chats."""
+        chat = self.current_chat
+        has_messages = bool(chat and chat.get("messages"))
+        self.chat_menu_button.setVisible(has_messages)
+        self.save_chat_button.setVisible(has_messages and bool(chat.get("temporary")))
 
     def sampling(self):
         return {"temperature":self.temperature.value(),"top_p":self.top_p.value(),"top_k":self.top_k.value(),
@@ -419,7 +451,7 @@ class MainWindow(QMainWindow):
             try: info = read_gguf_info(Path(saved)); existing[info["path"]] = info
             except (OSError, ValueError): pass
         self.models = [m for m in existing.values() if Path(m["path"]).is_file()]
-        for combo in (self.model_combo,self.compare_a,self.compare_b):
+        for combo in (self.compare_a,self.compare_b):
             previous = combo.currentData(); combo.blockSignals(True); combo.clear(); combo.addItem("Choose a model…","")
             for info in self.models:
                 combo.addItem(model_label(info),info["path"])
@@ -427,7 +459,74 @@ class MainWindow(QMainWindow):
             if index < 1 and combo is not self.compare_b and self.models: index = 1
             combo.setCurrentIndex(max(0,index)); combo.blockSignals(False)
             combo.view().setMinimumWidth(combo.view().sizeHintForColumn(0) + 84)   # the closed box is narrow; the list shows full names
-        self._model_changed()
+        self.settings_page.set_models([(m["path"],model_label(m)) for m in self.models], self.preferences.get("default_model",""))
+        self._active_model_changed()
+
+    @property
+    def active_model(self):
+        """Path of the model that is loaded right now, or "" when there is none."""
+        return self.engine.loaded_model or ""
+
+    def _model_entries(self):
+        entries = []
+        for info in self.models:
+            if info.get("kind") == "gguf":
+                quant = f" {info['quantization']}" if info.get("quantization") else ""
+                details = f"GGUF{quant}  \u00b7  {human_size(info['size_bytes'])}  \u00b7  {info['context_length']:,} token context"
+                entries.append({"path":info["path"],"title":info["title"],"details":details})
+            else:
+                details = f"Trance  \u00b7  {info['parameters']/1e6:.1f}M parameters  \u00b7  {info['context_length']:,} token context"
+                entries.append({"path":info["path"],"title":friendly(info["path"]),"details":details})
+        return entries
+
+    def _refresh_model_ui(self):
+        """Bring the header button, Eject and the picker's list in line with what is loaded or loading."""
+        loaded, loading = self.active_model, self._loading_model
+        if loading: self.model_button.set_label(f"Loading {self._model_name(loading)}\u2026")
+        elif loaded: self.model_button.set_label(self._model_name(loaded))
+        else: self.model_button.set_label("No Model Loaded, Pick one to use", placeholder=True)
+        self.eject_button.setVisible(bool(loaded or loading))
+        self.eject_button.setText("Cancel" if loading else "Eject")
+        self.eject_button.setToolTip("Stop loading this model" if loading else "Unload the model and free its memory")
+        self.model_picker.set_models(self._model_entries(), loaded, can_eject=self._can_eject())
+        self.eject_button.setEnabled(bool(loading) or self._can_eject())
+        self._update_welcome()
+
+    def _can_eject(self):
+        return bool(self.engine.loaded_model) and not (self._busy or self.engine.busy) and not self.training_active
+
+    def _open_model_picker(self):
+        if self._busy or self.training_active: return
+        self._refresh_model_ui()
+        self.model_picker.open()
+
+    def _picker_closed(self):
+        if self.pages.currentIndex() == 0: self.composer.setFocus()
+
+    def _load_model(self, path):
+        """Load a model now, unloading the one in memory. Returns False when nothing was started."""
+        if not path or self.engine.busy or self.training_active: return False
+        if str(Path(path).resolve()) == self.engine.loaded_model: return True      # already loaded
+        if backend_kind(path) == "gguf" and self.runtimes.resolve() is None:
+            self.statusBar().showMessage(NO_RUNTIME); return False
+        self._loading_model, self.operation, self._engine_error = path, "load", False
+        self._set_busy(True)
+        try: self.engine.load(path)
+        except RuntimeError as error:
+            self._loading_model, self.operation = "", None
+            self._set_busy(False); self.statusBar().showMessage(str(error)); return False
+        return True
+
+    def _load_default_model(self):
+        path = self.preferences.get("default_model","")
+        if not path or self.engine.loaded_model or self.engine.busy or self.training_active: return
+        if not any(m["path"] == path for m in self.models):
+            self.statusBar().showMessage(f"Default model not found: {Path(path).name}"); return
+        self._load_model(path)
+
+    def _set_default_model(self, path):
+        self.preferences["default_model"] = path
+        self._save_preferences()
 
     def _browse_model(self):
         path, _ = QFileDialog.getOpenFileName(self,"Choose a model",str(ROOT/"models"),"Models (*.bin *.gguf);;Trance models (*.bin);;GGUF models (*.gguf)")
@@ -438,7 +537,7 @@ class MainWindow(QMainWindow):
                 self.preferences["gguf_paths"] = saved + [info["path"]]; self._save_preferences()
             else: info = model_info(Path(path))
             self.models.append(info); self.refresh_models()
-            self.model_combo.setCurrentIndex(self.model_combo.findData(info["path"]))
+            self._load_model(info["path"])                  # choosing a file loads it, like choosing from the list
         except (OSError,ValueError) as error: self.statusBar().showMessage(str(error))
 
     def _model_name(self, path):
@@ -447,23 +546,28 @@ class MainWindow(QMainWindow):
         return friendly(path) if backend_kind(path) == "trance" else Path(path).stem
 
     def _eject_model(self):
-        if self.engine.busy or self.training_active or not self.engine.loaded_model: return
+        if self._loading_model:                      # while a model is loading the button reads Cancel
+            self.engine.cancel(); return
+        if not self._can_eject(): return
         name = self._model_name(self.engine.loaded_model)
         self.engine.release()
         self.statusBar().showMessage(f"Ejected {name}; its memory is free")
 
     def _update_eject(self):
-        ready = bool(self.engine.loaded_model) and not (self._busy or self.engine.busy) and not self.training_active
-        self.eject_button.setEnabled(ready)
+        self.eject_button.setEnabled(bool(self._loading_model) or self._can_eject())
+        self.model_picker.eject_button.setEnabled(self._can_eject())
 
     def _model_unloaded(self):
-        self._update_eject(); self._update_status()
+        self._update_eject(); self._update_status(); self._active_model_changed()
 
     def _model_loaded(self, info):
         name = friendly(info["model"]) if backend_kind(info["model"]) == "trance" else Path(info["model"]).stem
         size = f" \u00b7 {info['parameters']/1e6:.2f}M parameters" if info.get("parameters") else ""
+        if self.operation == "load":                 # a model picked on purpose is now ready
+            self.operation, self._loading_model = None, ""
+            self._set_busy(False)
         self.statusBar().showMessage(f"Loaded {name}{size}")
-        self._update_eject(); self._update_status()
+        self._update_eject(); self._update_status(); self._active_model_changed()
 
     def _set_llama_path(self, value):
         self.preferences["llama_server_path"] = value; self._save_preferences()
@@ -471,21 +575,24 @@ class MainWindow(QMainWindow):
     def _set_llama_runtime(self, value):
         self.preferences["llama_runtime"] = value; self._save_preferences()
 
-    def _model_changed(self):
-        path = self.model_combo.currentData()
+    def _active_model_changed(self):
+        """The loaded model changed (or there is none): refresh everything that depends on it."""
+        path = self.active_model
         self._update_welcome()
         info = next((m for m in self.models if m["path"]==path),None)
         kind = backend_kind(path) if path else "trance"
         if info and info.get("kind") == "gguf":
             quant = f" \u00b7 {info['quantization']}" if info.get("quantization") else ""
-            self.model_combo.setToolTip(f"GGUF ({info['architecture']}) \u00b7 {info['context_length']:,} token context{quant} \u00b7 {human_size(info['size_bytes'])}")
+            self.model_button.setToolTip(f"GGUF ({info['architecture']}) \u00b7 {info['context_length']:,} token context{quant} \u00b7 {human_size(info['size_bytes'])}")
         elif info:
-            self.model_combo.setToolTip(f"{info['parameters']/1e6:.2f}M parameters · {info['context_length']:,} token context · Step {info['step']:,}")
-        else: self.model_combo.setToolTip("Select a trained model or browse to a checkpoint with its tokenizer.")
+            self.model_button.setToolTip(f"{info['parameters']/1e6:.2f}M parameters · {info['context_length']:,} token context · Step {info['step']:,}")
+        elif path: self.model_button.setToolTip(path)
+        else: self.model_button.setToolTip("Choose a model to load. Only one model is loaded at a time.")
         if hasattr(self,"max_tokens"):
             context = info["context_length"] if info else 0
             self._apply_max_tokens(kind, context-1 if context else (131071 if kind=="gguf" else 1023))
         if hasattr(self,"think_button"): self._update_think_button()
+        self._refresh_model_ui()
 
     def _thinking_support(self, model):
         """Whether a GGUF model's chat template has a thinking mode (read once per file, then remembered)."""
@@ -500,8 +607,8 @@ class MainWindow(QMainWindow):
         return cached[1]
 
     def _update_think_button(self):
-        model = self.model_combo.currentData()
-        if not model: enabled, tip = False, "Thinking mode, for models that support it. Choose a model first."
+        model = self.active_model
+        if not model: enabled, tip = False, "Thinking mode, for models that support it. Load a model first."
         elif backend_kind(model) == "trance": enabled, tip = False, "Trance models do not have a thinking mode."
         elif self._thinking_support(model): enabled, tip = True, "Let the model think before it answers. The reasoning is shown in a fold above the reply."
         else: enabled, tip = False, "This model does not have a thinking mode."
@@ -575,6 +682,7 @@ class MainWindow(QMainWindow):
         for view in (self.transcript, *self.compare_views): view.restyle()
         self.chart_legend.setText(self._legend_html()); self.chart.update()
         self._refresh_runs(); self.documentation.restyle(); self._update_status()
+        self.model_button.update(); self.model_picker.list.viewport().update()
 
     @staticmethod
     def _legend_html():
@@ -590,7 +698,7 @@ class MainWindow(QMainWindow):
 
     def _update_status(self):
         if self.training_active: state, title = "busy", f"Training \u00b7 {self.progress.value()//10}%"
-        elif self._busy: state, title = "busy", "Generating\u2026"
+        elif self._busy: state, title = "busy", "Loading model\u2026" if self.operation == "load" else "Generating\u2026"
         elif self._engine_error: state, title = "error", "Last request failed"
         elif self.engine.loaded_model: state, title = "ok", "Ready"
         else: state, title = "idle", "No model loaded"
@@ -609,7 +717,7 @@ class MainWindow(QMainWindow):
     def _new_chat(self, *, temporary=False):
         if self.engine.busy:
             self.statusBar().showMessage("Stop the current response before starting a new conversation"); return
-        chat = new_chat(self.model_combo.currentData() or "")
+        chat = new_chat(self.active_model)
         if temporary: chat.update(temporary=True,title="Temporary chat")
         self.current_chat=chat
         self._display_chat()
@@ -637,8 +745,9 @@ class MainWindow(QMainWindow):
     def _update_welcome(self):
         hint = getattr(self, "welcome_hint", None)
         if hint is None: return
-        model = self.model_combo.currentData()
-        if not model: text = "Choose a model above to get started."
+        model = self.active_model
+        if self._loading_model: text = "Loading the model\u2026"
+        elif not model: text = "Choose a model above to get started."
         elif backend_kind(model) == "gguf" and self.runtimes.resolve() is None:
             text = "This model needs the llama.cpp runtime. Install it in Tools \u2192 Settings."
         else: text = ""
@@ -673,6 +782,7 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, "model_picker"): self.model_picker.setGeometry(self.rect())
         if hasattr(self, "suggestion_row") and self._welcome_active: self._fill_suggestions()
 
     def _use_starter(self, prompt):
@@ -693,17 +803,34 @@ class MainWindow(QMainWindow):
         if self.engine.busy: return
         item = self.chat_list.itemAt(position)
         if item is None: return
-        chat_id = item.data(Qt.ItemDataRole.UserRole)
-        menu = QMenu(self.chat_list); round_popup(menu)
-        rename = menu.addAction("Rename chat…")
-        delete = menu.addAction("Delete chat")
-        action = menu.exec(self.chat_list.viewport().mapToGlobal(position))
+        self._show_chat_menu(item.data(Qt.ItemDataRole.UserRole), self.chat_list.viewport().mapToGlobal(position))
+
+    def _open_chat_menu(self):
+        if self.current_chat: self._show_chat_menu(self.current_chat["id"], anchor=self.chat_menu_button)
+
+    def _show_chat_menu(self, chat_id, position=None, *, anchor=None):
+        """The one chat menu (Rename, Export, Delete), shared by the sidebar's right-click and ⋯ and the header's ⋯."""
+        menu = QMenu(self); round_popup(menu)
+        rename = menu.addAction("Rename")
+        export = menu.addAction("Export")
+        delete = menu.addAction("Delete")
+        rename.setEnabled(not self.engine.busy); delete.setEnabled(not self.engine.busy)    # a reply is being written
+        if anchor is not None:                       # drop down under the button, right edges aligned
+            position = anchor.mapToGlobal(QPoint(anchor.width() - menu.sizeHint().width(), anchor.height() + 4))
+        action = menu.exec(position)
         if action == rename: self._rename_chat(chat_id)
+        elif action == export: self._export_chat(chat_id)
         elif action == delete: self._delete_chat(chat_id)
+
+    def _chat_by_id(self, chat_id):
+        """A saved chat, or the open chat when it is a temporary one (those never enter self.chats)."""
+        chat = next((chat for chat in self.chats if chat["id"] == chat_id),None)
+        if chat is None and self.current_chat and self.current_chat["id"] == chat_id: chat = self.current_chat
+        return chat
 
     def _rename_chat(self, chat_id):
         if self.engine.busy: return
-        chat = next((chat for chat in self.chats if chat["id"] == chat_id),None)
+        chat = self._chat_by_id(chat_id)
         if chat is None: return
         title, accepted = QInputDialog.getText(self,"Rename chat","Chat name:",
                                               QLineEdit.EchoMode.Normal,chat.get("title","Conversation"))
@@ -711,13 +838,17 @@ class MainWindow(QMainWindow):
         if not accepted or not title: return
         previous = chat.get("title","Conversation")
         chat["title"] = title
-        if not self._save_chats(): chat["title"] = previous
+        # A temporary chat has no history entry yet; it keeps the new name for when it is saved.
+        if any(c is chat for c in self.chats) and not self._save_chats(): chat["title"] = previous
         self._refresh_chats()
 
     def _delete_chat(self, chat_id):
         if self.engine.busy: return
         index = next((i for i,chat in enumerate(self.chats) if chat["id"] == chat_id),None)
-        if index is None: return
+        if index is None:
+            if self.current_chat and self.current_chat["id"] == chat_id and self.current_chat.get("temporary"):
+                self._new_chat()                     # a temporary chat is only in memory: deleting it discards it
+            return
         deleted = self.chats.pop(index)
         if not self._save_chats():
             self.chats.insert(index,deleted)
@@ -727,13 +858,26 @@ class MainWindow(QMainWindow):
             else: self._new_chat()
         else: self._refresh_chats()
 
+    def _save_temporary_chat(self):
+        """Turn the open temporary chat into a normal chat: it joins the history and the sidebar."""
+        chat = self.current_chat
+        if not chat or not chat.get("temporary") or not chat.get("messages"): return
+        previous = chat.get("title","")
+        chat.pop("temporary", None)
+        if previous in ("", "Temporary chat", "New conversation"):       # not renamed: name it from the first message, like any chat
+            first = next((m.get("content","") for m in chat["messages"] if m.get("role") == "user"), "")
+            chat["title"] = " ".join(first.split())[:45] or "Conversation"
+        self.chats.insert(0, chat)
+        if not self._save_chats():                   # could not write the history: stay temporary
+            self.chats.pop(0); chat["temporary"] = True; chat["title"] = previous
+            return
+        self._refresh_chats(); self._show_page(0)
+
     def _select_chat(self,index):
         if index < 0 or index >= len(self.chats): return
         if self.engine.busy:
             self._refresh_chats(); return
-        self.current_chat = self.chats[index]
-        selected = self.model_combo.findData(self.current_chat.get("model",""))
-        if selected >= 1: self.model_combo.setCurrentIndex(selected)
+        self.current_chat = self.chats[index]       # opening a chat never swaps the loaded model; it keeps chatting with it
         self._display_chat()
 
     def _save_chats(self):
@@ -753,11 +897,11 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(enabled); self.compare_run.setEnabled(enabled)
         self.stop_button.setEnabled(busy and self.operation=="chat"); self.compare_stop.setEnabled(busy and self.operation=="compare")
         for widget in (self.new_chat_button,self.temporary_chat_button,self.chat_search,self.chat_list): widget.setEnabled(not busy)
-        self.composer.setReadOnly(busy or self.training_active)
-        for widget in (self.model_combo,self.browse_model_button,self.refresh_model_button,self.compare_a,self.compare_b,self.compare_prompt,self.temperature,self.top_p,self.top_k,self.max_tokens,self.seed):
+        self.composer.setReadOnly((busy and self.operation != "load") or self.training_active)   # typing ahead is fine while a model loads
+        for widget in (self.model_button,self.compare_a,self.compare_b,self.compare_prompt,self.temperature,self.top_p,self.top_k,self.max_tokens,self.seed):
             widget.setEnabled(enabled)
         self.train_start.setEnabled(not busy and not self.training_active)
-        self._update_eject(); self._update_status()
+        self._update_eject(); self._update_status(); self._refresh_model_ui()
 
     def _generation_settings(self, model, base=None):
         """Sampling settings for one request, adapted to the kind of model."""
@@ -771,9 +915,9 @@ class MainWindow(QMainWindow):
 
     def _send_chat(self):
         if self.engine.busy or self.training_active: return
-        text = self.composer.toPlainText().strip(); model = self.model_combo.currentData()
+        text = self.composer.toPlainText().strip(); model = self.active_model
         if not text: return
-        if not model: self.statusBar().showMessage("Choose a trained model first"); return
+        if not model: self.statusBar().showMessage("No model is loaded. Pick one with the model button at the top"); return
         context = completed_context(self.current_chat["messages"])
         self.current_chat["model"]=model
         settings = self._generation_settings(model)
@@ -850,6 +994,9 @@ class MainWindow(QMainWindow):
             self.chat_hint.setText(f"Context: {event['prompt_tokens']:,}/{event['context_length']:,} tokens" + (f" · {dropped} older exchanges omitted" if dropped else ""))
 
     def _finished(self,event):
+        if self.operation=="load":                   # the only way a load finishes without `loaded` is that it was cancelled
+            self.operation=None; self._loading_model=""; self._set_busy(False)
+            self.statusBar().showMessage("Model load cancelled"); return
         message=self._active_message()
         if message is None: return
         reason=event.get("reason"); message["status"]="cancelled" if reason=="cancelled" else "complete"
@@ -876,7 +1023,7 @@ class MainWindow(QMainWindow):
             message.update(status="failed",note=error); self._render_active()
             if self.operation=="chat": self._save_chats()
             else: self._save_comparison()
-        self.operation=None; self._set_busy(False); self._engine_error=True; self._update_status(); self.statusBar().showMessage(error)
+        self.operation=None; self._loading_model=""; self._set_busy(False); self._engine_error=True; self._update_status(); self.statusBar().showMessage(error)
 
     def _stop(self):
         self.compare_cancelled=True; self.engine.cancel()
@@ -886,11 +1033,13 @@ class MainWindow(QMainWindow):
         try: atomic_json(self.state_dir/"comparisons"/(self.comparison["id"]+".json"),self.comparison)
         except OSError as error: self.statusBar().showMessage(f"Could not save comparison: {error}")
 
-    def _export_chat(self):
-        if not self.current_chat: return
-        path,_=QFileDialog.getSaveFileName(self,"Export conversation",self.current_chat["title"]+".json","JSON (*.json)")
+    def _export_chat(self, chat_id=None):
+        chat = self._chat_by_id(chat_id) if chat_id else self.current_chat
+        if not chat: return
+        name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "-", chat.get("title","")).strip(" .-") or "conversation"
+        path,_=QFileDialog.getSaveFileName(self,"Export conversation",name+".json","JSON (*.json)")
         if path:
-            try: atomic_json(Path(path),self.current_chat)
+            try: atomic_json(Path(path),chat)
             except OSError as error: self.statusBar().showMessage(str(error))
 
     def _export_compare(self):

@@ -37,8 +37,6 @@ class ChatNavigationTests(unittest.TestCase):
         self.window.timer.stop()
         self.generate=patch.object(self.window.engine,"generate")
         self.mock_generate=self.generate.start()
-        self.window.model_combo.clear()
-        self.window.model_combo.addItem("CPU mock model","/unused-cpu-model.bin")
         self.window.show()
 
     def tearDown(self):
@@ -48,7 +46,23 @@ class ChatNavigationTests(unittest.TestCase):
         if self.app.styleSheet()!=sheet:self.app.setStyleSheet(sheet)
         self.generate.stop();self.runs.stop();self.gguf_scan.stop();self.temp.cleanup()
 
+    def load_mock(self,path="/unused-cpu-model.bin"):
+        """Pretend a model is loaded (or, with "", that none is): chatting needs one, and the engine itself is mocked out here."""
+        self.window.engine.loaded_model=path
+        self.window._active_model_changed()
+
+    def choose_from_menu(self,trigger,label):
+        """Open a chat menu through `trigger` and pick `label`; returns the menu's item labels. A real QMenu.exec would block a headless run."""
+        shown=[]
+        class Menu(QMenu):
+            def exec(menu,position=None,*args):
+                shown.extend(action.text() for action in menu.actions())
+                return next((action for action in menu.actions() if action.text()==label and action.isEnabled()),None)
+        with patch("gui.app.QMenu",Menu): trigger()
+        return shown
+
     def reply(self,text,answer="CPU mock reply"):
+        if not self.window.active_model: self.load_mock()          # chatting needs a loaded model
         self.window.composer.setPlainText(text)
         QTest.keyClick(self.window.composer,Qt.Key.Key_Return)
         self.mock_generate.assert_called()
@@ -133,6 +147,7 @@ class ChatNavigationTests(unittest.TestCase):
             self.assertTrue(self.window.composer_panel.isAncestorOf(widget))
         self.assertFalse(self.window.composer_panel.isAncestorOf(self.window.model_controls))
         self.assertFalse(self.window.transcript.toPlainText().strip())
+        self.load_mock()
         self.window.composer.setPlainText("send from the embedded button")
         QTest.mouseClick(self.window.send_button,Qt.MouseButton.LeftButton)
         self.assertEqual(self.mock_generate.call_args.args[1][-1]["content"],"send from the embedded button")
@@ -145,7 +160,8 @@ class ChatNavigationTests(unittest.TestCase):
         self.assertFalse(self.window.statusBar().isVisible())
         path=self.state/"export.json"
         with patch("gui.app.QFileDialog.getSaveFileName",return_value=(str(path),"JSON")):
-            QTest.mouseClick(self.window.chat_export_button,Qt.MouseButton.LeftButton)
+            shown=self.choose_from_menu(lambda:QTest.mouseClick(self.window.chat_menu_button,Qt.MouseButton.LeftButton),"Export")
+        self.assertEqual(shown,["Rename","Export","Delete"])
         self.assertEqual(read_json(path)["messages"][-1]["content"],"mock reply")
 
     def test_message_box_grows_for_wrapped_text_and_shrinks_when_cleared(self):
@@ -313,11 +329,10 @@ class ChatNavigationTests(unittest.TestCase):
 
     def test_empty_chat_shows_a_big_greeting_and_one_row_of_suggestions(self):
         w=self.window
-        w.model_combo.clear();w.model_combo.addItem("Choose a model…","");w._update_welcome()
         self.assertEqual(w.chat_content.currentIndex(),2)
         self.assertIn(w.welcome_title.text(),GREETINGS)
-        self.assertTrue(w.welcome_hint.isVisible())
-        w.model_combo.clear();w.model_combo.addItem("CPU mock model","/unused-cpu-model.bin")
+        self.assertTrue(w.welcome_hint.isVisible())                  # nothing is loaded yet
+        self.load_mock()
         self.assertFalse(w.welcome_hint.isVisible())
         self.assertTrue(w.suggestion_row.isVisible())
         chips=w.suggestion_row.findChildren(QPushButton)
@@ -379,12 +394,14 @@ class ChatNavigationTests(unittest.TestCase):
         w=self.window;info=self.gguf_info()
         with patch("gui.app.discover_gguf",return_value=[info]):
             w.refresh_models()
-        for combo in (w.model_combo,w.compare_a,w.compare_b):
+        for combo in (w.compare_a,w.compare_b,w.settings_page.default_model_card.combo):
             index=combo.findData(info["path"])
             self.assertGreater(index,0)
             self.assertEqual(combo.itemText(index).split("  ·  ")[:2],["Tiny Chat","GGUF Q4_K_M"])
-        w.model_combo.setCurrentIndex(w.model_combo.findData(info["path"]))
-        self.assertIn("2,048 token context",w.model_combo.toolTip())
+        entry=next(e for e in w._model_entries() if e["path"]==info["path"])    # and in the picker's own list
+        self.assertEqual(entry["title"],"Tiny Chat");self.assertTrue(entry["details"].startswith("GGUF Q4_K_M"))
+        self.load_mock(info["path"])
+        self.assertIn("2,048 token context",w.model_button.toolTip())
         self.assertEqual(w.max_tokens.maximum(),2047)
 
     def test_model_sizes_are_readable_at_every_scale(self):
@@ -392,15 +409,20 @@ class ChatNavigationTests(unittest.TestCase):
         self.assertEqual([human_size(n) for n in (400_000,477_984,2_500_000,45_000_000,4_600_000_000)],["400 KB","478 KB","2.5 MB","45 MB","4.6 GB"])
         w=self.window;info=self.gguf_info()
         with patch("gui.app.discover_gguf",return_value=[info]): w.refresh_models()
-        index=w.model_combo.findData(info["path"])
-        self.assertTrue(w.model_combo.itemText(index).endswith("KB"))
-        self.assertGreater(w.model_combo.view().minimumWidth(),150)
+        index=w.compare_a.findData(info["path"])
+        self.assertTrue(w.compare_a.itemText(index).endswith("KB"))
+        self.assertGreater(w.compare_a.view().minimumWidth(),150)
 
     def test_choosing_a_gguf_without_the_runtime_points_to_settings(self):
         w=self.window;info=self.gguf_info()
         with patch("gui.app.discover_gguf",return_value=[info]),patch.object(w.runtimes,"resolve",return_value=None):
             w.refresh_models()
-            w.model_combo.setCurrentIndex(w.model_combo.findData(info["path"]))
+            with patch.object(w.engine,"load") as load:
+                self.assertFalse(w._load_model(info["path"]))                # refused up front, with the way forward
+                load.assert_not_called()
+            self.assertIn("llama.cpp runtime",w.statusBar().currentMessage());self.assertEqual(w._loading_model,"")
+            self.assertFalse(w._busy)
+            self.load_mock(info["path"])                                     # a model already loaded when the runtime goes missing
             self.assertTrue(w.welcome_hint.isVisible())
             self.assertIn("llama.cpp runtime",w.welcome_hint.text())
         with patch.object(w.runtimes,"resolve",return_value=RuntimeInfo(Path("/x/llama-server"),"path")):
@@ -409,15 +431,19 @@ class ChatNavigationTests(unittest.TestCase):
 
     def test_browse_accepts_gguf_files_and_remembers_them_across_restarts(self):
         w=self.window;path=write_gguf(self.state/"elsewhere"/"Picked.gguf",*chat_model("Picked","llama",1024,7))
-        with patch("gui.app.QFileDialog.getOpenFileName",return_value=(str(path),"")) as dialog:
+        with patch("gui.app.QFileDialog.getOpenFileName",return_value=(str(path),"")) as dialog,patch.object(w.engine,"load") as load, \
+             patch.object(w.runtimes,"resolve",return_value=RuntimeInfo(Path("/x/llama-server"),"path")):
             w._browse_model()
             self.assertIn("*.gguf",dialog.call_args.args[3])
-        self.assertEqual(w.model_combo.currentData(),str(path.resolve()))
+            load.assert_called_once_with(str(path.resolve()))                # choosing a file loads it, like choosing from the list
+        self.assertEqual(w._loading_model,str(path.resolve()))
+        w._failed("test over")                                               # (the engine is mocked, so end the pretend load)
+        self.assertIn(str(path.resolve()),[m["path"] for m in w.models])
         self.assertEqual(read_json(self.state/"settings.json")["gguf_paths"],[str(path.resolve())])
         w.close()
         reopened=MainWindow(state_dir=self.state,binary=Path("/unused-cpu-test-engine"));reopened.timer.stop()
         try:
-            self.assertGreater(reopened.model_combo.findData(str(path.resolve())),0)
+            self.assertGreater(reopened.compare_a.findData(str(path.resolve())),0)
         finally: reopened.close()
         with patch("gui.app.QFileDialog.getOpenFileName",return_value=(str(self.state/"nope.gguf"),"")):
             self.window._browse_model()                                   # unreadable files only produce a message
@@ -487,7 +513,7 @@ class ChatNavigationTests(unittest.TestCase):
 
     def test_other_backends_without_trance_fields_do_not_break_the_message_flow(self):
         w=self.window
-        w.composer.setPlainText("hello");w.model_combo.setCurrentIndex(0)   # the mock model
+        self.load_mock();w.composer.setPlainText("hello")
         w._send_chat()
         w._generation_started({})                      # a llama.cpp "started" event carries no prompt_tokens
         w._delta("Hi there")
@@ -501,12 +527,12 @@ class ChatNavigationTests(unittest.TestCase):
         self.assertEqual(w.max_tokens.value(),160)                              # a Trance-style model keeps a modest cap
         w.max_tokens.setValue(300)
         with patch("gui.app.discover_gguf",return_value=[info]): w.refresh_models()
-        w.model_combo.setCurrentIndex(w.model_combo.findData(info["path"]))
+        self.load_mock(info["path"])
         self.assertEqual((w.max_tokens.value(),w.max_tokens.text(),w.max_tokens.maximum()),(0,"No limit",4095))
         w.max_tokens.setValue(2000)
-        w.model_combo.setCurrentIndex(0)
+        self.load_mock("")                                                   # ejected
         self.assertEqual((w.max_tokens.value(),w.max_tokens.maximum()),(300,1023))
-        w.model_combo.setCurrentIndex(w.model_combo.findData(info["path"]))
+        self.load_mock(info["path"])
         self.assertEqual(w.max_tokens.value(),2000)
         w._save_preferences()
         saved=read_json(self.state/"settings.json");self.assertEqual((saved["max_new_tokens"],saved["max_new_tokens_gguf"]),(300,2000))
@@ -536,7 +562,7 @@ class ChatNavigationTests(unittest.TestCase):
     def test_requests_record_the_limit_they_were_sent_with(self):
         w=self.window
         with patch.object(w.engine,"generate") as generate:
-            w.max_tokens.setValue(0);w.composer.setPlainText("hello");w.model_combo.setCurrentIndex(0);w._send_chat()
+            self.load_mock();w.max_tokens.setValue(0);w.composer.setPlainText("hello");w._send_chat()
         self.assertEqual(generate.call_args.args[2]["max_new_tokens"],512)           # the mock Trance model has no known window -> default 1024 // 2
         self.assertEqual(w.current_chat["messages"][-1]["token_limit"],512)
 
@@ -559,14 +585,13 @@ class ChatNavigationTests(unittest.TestCase):
         thinker=self.thinking_model("Thinker","{% if enable_thinking %}<think>{% endif %}")
         plain=self.thinking_model("Plain","<start_of_turn>user\n{{ content }}")
         with patch("gui.app.discover_gguf",return_value=[thinker,plain]): w.refresh_models()
-        pick=lambda info:w.model_combo.setCurrentIndex(w.model_combo.findData(info["path"]))
-        w.model_combo.setCurrentIndex(0)                                             # "Choose a model…"
-        self.assertFalse(w.think_button.isEnabled());self.assertIn("Choose a model",w.think_button.toolTip())
+        pick=lambda info:self.load_mock(info["path"])
+        self.assertFalse(w.think_button.isEnabled());self.assertIn("Load a model",w.think_button.toolTip())   # nothing loaded
         pick(plain);self.assertFalse(w.think_button.isEnabled());self.assertIn("does not have a thinking mode",w.think_button.toolTip())
         pick(thinker);self.assertTrue(w.think_button.isEnabled())
-        w.model_combo.clear();w.model_combo.addItem("A Trance model","/m/trance.bin")
+        self.load_mock("/m/trance.bin")
         self.assertFalse(w.think_button.isEnabled());self.assertIn("Trance models",w.think_button.toolTip())
-        w.model_combo.clear();w.model_combo.addItem("Thinker",thinker["path"]);w.think_button.setChecked(True)
+        self.load_mock(thinker["path"]);w.think_button.setChecked(True)
         self.assertEqual(read_json(self.state/"settings.json")["thinking"],True)
         w.close()
         reopened=MainWindow(state_dir=self.state,binary=Path("/unused-cpu-test-engine"));reopened.timer.stop()
@@ -711,7 +736,7 @@ class ChatNavigationTests(unittest.TestCase):
         w.current_chat["messages"]=long;t.follow_end();t.render(long);QTest.qWait(40)
         bar.setValue(0);QTest.qWait(20)
         with patch.object(w.engine,"generate"):
-            w.composer.setPlainText("next");w.model_combo.setCurrentIndex(0);w._send_chat();QTest.qWait(60)
+            self.load_mock();w.composer.setPlainText("next");w._send_chat();QTest.qWait(60)
         self.assertGreaterEqual(bar.value(),bar.maximum()-6)
 
     def test_messages_sit_close_together(self):
@@ -897,12 +922,10 @@ class ChatNavigationTests(unittest.TestCase):
         QTest.mousePress(self.window.chat_list.viewport(),Qt.MouseButton.RightButton,pos=position)
         QTest.mouseRelease(self.window.chat_list.viewport(),Qt.MouseButton.RightButton,pos=position)
         self.assertEqual(self.window.current_chat["id"],temporary_id)
-        for chosen,method in ((sentinel.rename,"_rename_chat"),(sentinel.delete,"_delete_chat")):
-            with patch("gui.app.QMenu") as menu,patch.object(self.window,method) as callback:
-                menu.return_value.addAction.side_effect=[sentinel.rename,sentinel.delete]
-                menu.return_value.exec.return_value=chosen
-                self.window._chat_context_menu(position)
-                self.assertEqual([c.args[0] for c in menu.return_value.addAction.call_args_list],["Rename chat…","Delete chat"])
+        for label,method in (("Rename","_rename_chat"),("Export","_export_chat"),("Delete","_delete_chat")):
+            with patch.object(self.window,method) as callback:
+                shown=self.choose_from_menu(lambda:self.window._chat_context_menu(position),label)
+                self.assertEqual(shown,["Rename","Export","Delete"])
                 callback.assert_called_once_with(saved_id)
 
     def test_rename_persists_while_temporary_chat_remains_private(self):

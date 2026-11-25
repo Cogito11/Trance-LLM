@@ -41,6 +41,7 @@ class BackendRouter(QObject):
                 if hasattr(backend, name):               # the native engine has no thinking channel
                     getattr(backend, name).connect(getattr(self, name))
         self.llama.unloaded.connect(lambda: self._clear_loaded(self.llama))
+        self.trance.unloaded.connect(lambda: self._clear_loaded(self.trance))
 
     def _note_loaded(self, info: dict):
         self.loaded_model = info["model"]
@@ -59,15 +60,28 @@ class BackendRouter(QObject):
     def busy(self) -> bool:
         return any(b.busy for b in self.backends)
 
-    def generate(self, model: str, messages: list[dict], settings: dict):
-        if self.busy:
-            raise RuntimeError("The engine is already working")
+    def _claim(self, model: str):
+        """Make `model`'s backend the only one holding memory, and forget a model that is about to be replaced."""
         chosen = self.llama if backend_kind(model) == "gguf" else self.trance
         for other in self.backends:           # only one backend may hold the GPU at a time
             if other is not chosen:
                 self._clear_loaded(other)
                 other.release()
+        if self.loaded_model and self.loaded_model != str(Path(model).resolve()):
+            self._clear_loaded()              # one model at a time: the old one is unloaded, even if the new one then fails
         self._active = chosen
+        return chosen
+
+    def load(self, model: str):
+        """Load a model now, replacing whatever is loaded; `loaded` fires when it is ready, `failed` if it cannot be."""
+        if self.busy:
+            raise RuntimeError("The engine is already working")
+        self._claim(model).load(model)
+
+    def generate(self, model: str, messages: list[dict], settings: dict):
+        if self.busy:
+            raise RuntimeError("The engine is already working")
+        chosen = self._claim(model)
         if chosen is self.trance: settings = {k: v for k, v in settings.items() if k not in GGUF_ONLY_SETTINGS}   # the native engine takes every field literally
         chosen.generate(model, messages, settings)
 

@@ -4,9 +4,10 @@ from __future__ import annotations
 import html
 import math
 
-from PySide6.QtCore import Qt, Signal, QRect, QRectF
+from PySide6.QtCore import Qt, Signal, QPointF, QRect, QRectF, QSize
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QComboBox, QListWidget, QPlainTextEdit, QStyle, QStyledItemDelegate, QTextBrowser, QWidget
+from PySide6.QtWidgets import (QComboBox, QListWidget, QPlainTextEdit, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
+                               QTextBrowser, QWidget)
 
 from .markdown import to_html as to_markdown_html
 from .theme import STYLE, COLORS as C  # STYLE re-exported for existing imports
@@ -78,6 +79,53 @@ class ConversationList(QListWidget):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+
+class DropdownButton(QPushButton):
+    """A button that looks like a drop-down: the label on the left (elided when long) and a chevron on the right.
+
+    It opens whatever the owner connects to `clicked`. The label is painted rather than set as the button text so
+    that a long model name is cut with an ellipsis instead of widening the header.
+    """
+    CHEVRON = 30                                   # room kept on the right for the chevron
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("dropdown")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self._label, self._placeholder = "", False
+
+    def set_label(self, text: str, *, placeholder: bool = False):
+        self._label, self._placeholder = text, placeholder
+        self.setAccessibleName(text)
+        self.updateGeometry(); self.update()
+
+    def label(self) -> str:
+        return self._label
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(self.fontMetrics().horizontalAdvance(self._label) + 18 + self.CHEVRON, max(hint.height(), 38))
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(140, max(super().minimumSizeHint().height(), 38))
+
+    def paintEvent(self, event):
+        super().paintEvent(event)                  # no button text is set: the style sheet draws just the box
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled(): color = C["text_disabled"]
+        elif self._placeholder: color = C["text_subtle"]
+        else: color = C["text"]
+        painter.setPen(QColor(color))
+        area = self.rect().adjusted(14, 0, -self.CHEVRON, 0)
+        painter.drawText(area, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         self.fontMetrics().elidedText(self._label, Qt.TextElideMode.ElideRight, area.width()))
+        cx, cy = self.width() - 17, self.height() / 2                       # chevron
+        painter.setPen(QPen(QColor(C["text_disabled"] if not self.isEnabled() else C["text_muted"]), 1.6,
+                            Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPolyline([QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2)])
 
 
 class Composer(QPlainTextEdit):

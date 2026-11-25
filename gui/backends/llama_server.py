@@ -110,6 +110,22 @@ class LlamaServerBackend(QObject):
         else:
             self._start_server(info, model)
 
+    def load(self, model: str):
+        """Start the server on a model without generating anything; `loaded` fires when it is ready."""
+        if self.busy:
+            raise RuntimeError("The engine is already working")
+        model = str(Path(model).resolve())
+        self._pending = {"model": model, "load_only": True}
+        self._cancelled, self._errors = False, ""
+        info = self._resolver()
+        if info is None:
+            QTimer.singleShot(0, lambda: self._fail(NO_RUNTIME)); return
+        if self.running and self._model == model and self._phase == "idle":
+            self._pending = None
+            self.loaded.emit({"model": model, "parameters": 0})      # already in memory
+        else:
+            self._start_server(info, model)
+
     def cancel(self):
         if not self.busy: return
         self._cancelled = True
@@ -164,10 +180,12 @@ class LlamaServerBackend(QObject):
 
     def _server_ready(self, model: str):
         if not self.busy or self._phase != "loading": return
+        load_only = bool(self._pending.get("load_only"))
         self._model, self._phase = model, "idle"
+        if load_only: self._pending = None      # cleared first: listeners of `loaded` check `busy` to decide whether to allow eject
         self.loaded.emit({"model": model, "parameters": 0})
         self.ready.emit(self._runtime_label.strip())
-        self._request()
+        if not load_only: self._request()
 
     def _request(self):
         pending = self._pending

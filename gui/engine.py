@@ -21,6 +21,7 @@ class EngineClient(QObject):
     state_changed = Signal(str)
     ready = Signal(str)
     loaded = Signal(dict)
+    unloaded = Signal()                 # the engine lost its model without being asked to (it crashed or was stopped)
 
     def __init__(self, parent=None, binary: Path | None = None):
         super().__init__(parent)
@@ -50,7 +51,16 @@ class EngineClient(QObject):
     def generate(self, model: str, messages: list[dict], settings: dict):
         if self.busy:
             raise RuntimeError("The engine is already working")
-        self._pending = {"model": str(Path(model).resolve()), "messages": messages, **settings}
+        self._begin({"model": str(Path(model).resolve()), "messages": messages, **settings})
+
+    def load(self, model: str):
+        """Load a model without generating anything; `loaded` fires when it is ready, `failed` if it cannot be."""
+        if self.busy:
+            raise RuntimeError("The engine is already working")
+        self._begin({"model": str(Path(model).resolve()), "load_only": True})
+
+    def _begin(self, pending: dict):
+        self._pending = pending
         self._cancelled = False
         self._closed = False
         self._errors = ""
@@ -77,8 +87,16 @@ class EngineClient(QObject):
             self._phase = "loading"
             self.state_changed.emit("Loading model…")
             self._send("load", model=self._pending["model"])
+        elif self._pending.get("load_only"):
+            self._finish_load({"model": self._loaded})
         else:
             self._generate()
+
+    def _finish_load(self, event):
+        # Clear the request first: listeners of `loaded` check `busy` to decide whether the model can be ejected.
+        self._pending = None
+        self._phase = "idle"
+        self.loaded.emit(event)
 
     def _generate(self):
         self._phase = "preparing"
@@ -110,8 +128,11 @@ class EngineClient(QObject):
                 continue
             if kind == "loaded":
                 self._loaded = event["model"]
-                self.loaded.emit(event)
-                self._generate()
+                if self._pending and self._pending.get("load_only"):
+                    self._finish_load(event)
+                else:
+                    self.loaded.emit(event)
+                    self._generate()
             elif kind == "generation_started":
                 self._phase = "generating"
                 self.state_changed.emit("Generating…")
@@ -133,7 +154,12 @@ class EngineClient(QObject):
                 self._phase = "idle"
                 self.finished.emit(event)
             elif kind == "error":
+                failed_loading = self._phase == "loading"
                 self._fail(event.get("message", "Engine error"))
+                if failed_loading:
+                    # The engine drops its previous model before reading a new one, so after a failed load it
+                    # may hold nothing. Restart it rather than guess what is on the GPU.
+                    self.release()
 
     def _stderr(self):
         self._errors = (self._errors + bytes(self.process.readAllStandardError()).decode("utf-8", "replace"))[-8192:]
@@ -145,8 +171,10 @@ class EngineClient(QObject):
     def _exited(self, code, status):
         self._stderr()
         self._ready = False
-        self._loaded = ""
+        had_model, self._loaded = bool(self._loaded), ""
         self._buffer = b""
+        if had_model and not self._closed:      # a deliberate release or close is not news; a crash or a cancel that kills the engine is
+            self.unloaded.emit()
         if self._pending:
             if self._cancelled:
                 self._pending = None

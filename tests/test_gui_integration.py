@@ -39,7 +39,16 @@ class GuiIntegrationTests(unittest.TestCase):
             if time.monotonic()>end:self.fail("Timed out; status: "+self.window.statusBar().currentMessage())
             QTest.qWait(15)
 
+    def load_model(self):
+        """Load the first available model, as a person would from the model picker (chatting no longer loads one by itself)."""
+        if self.window.active_model: return
+        self.assertTrue(self.window.models,"no model available to test with")
+        self.assertTrue(self.window._load_model(self.window.models[0]["path"]))
+        self.wait_for(lambda:self.window.operation is None)
+        self.assertTrue(self.window.active_model,self.window.statusBar().currentMessage())
+
     def send(self,text):
+        self.load_model()
         self.window.composer.setPlainText(text)
         QTest.keyClick(self.window.composer,Qt.Key.Key_Return)
         self.wait_for(lambda:self.window.operation is None)
@@ -70,7 +79,7 @@ class GuiIntegrationTests(unittest.TestCase):
         self.assertTrue(self.window.compare_run.isEnabled())
 
     def test_stop_button_and_next_request(self):
-        self.window.max_tokens.setValue(500);self.window.composer.setPlainText('Hi!');self.window._send_chat()
+        self.load_model();self.window.max_tokens.setValue(500);self.window.composer.setPlainText('Hi!');self.window._send_chat()
         self.wait_for(lambda:self.window.engine.trance._phase=='generating')
         QTest.mouseClick(self.window.stop_button,Qt.MouseButton.LeftButton)
         self.wait_for(lambda:self.window.operation is None)
