@@ -9,15 +9,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QPushButton, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout)
 
+from .modal import ModalOverlay
 from .theme import COLORS as C
 
 PATH_ROLE = Qt.ItemDataRole.UserRole
 DETAIL_ROLE = Qt.ItemDataRole.UserRole + 1
 LOADED_ROLE = Qt.ItemDataRole.UserRole + 2
+NEEDS_ROLE = Qt.ItemDataRole.UserRole + 3
 
 
 class ModelRowDelegate(QStyledItemDelegate):
@@ -46,6 +48,14 @@ class ModelRowDelegate(QStyledItemDelegate):
             painter.setFont(font); painter.setPen(QColor(C["accent"]))
             painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "Loaded")
             right = badge.left() - 12
+        elif index.data(NEEDS_ROLE):                            # a GGUF model while no llama.cpp runtime is installed
+            font = QFont(opt.font); font.setPixelSize(11); font.setWeight(QFont.Weight.DemiBold)
+            width = QFontMetrics(font).horizontalAdvance("Needs runtime") + 20
+            chip = QRect(rect.right() - width + 1, rect.center().y() - 10, width, 20)
+            painter.setPen(QPen(QColor(C["warning"]), 1)); painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(chip.adjusted(0, 0, -1, -1), 10, 10)
+            painter.setFont(font); painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, "Needs runtime")
+            right = chip.left() - 12
         room = max(40, right - rect.left())
         title_font = QFont(opt.font); title_font.setPixelSize(13); title_font.setWeight(QFont.Weight.DemiBold)
         detail_font = QFont(opt.font); detail_font.setPixelSize(11)
@@ -70,21 +80,16 @@ class _SearchField(QLineEdit):
             super().keyPressEvent(event)
 
 
-class ModelPicker(QFrame):
+class ModelPicker(ModalOverlay):
     picked = Signal(str)             # the path of the chosen model
     eject_requested = Signal()
     browse_requested = Signal()
     refresh_requested = Signal()
-    closed = Signal()
-
-    CARD_WIDTH, CARD_HEIGHT, MARGIN = 540, 560, 28
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.setObjectName("modalOverlay")
         self._entries: list[dict] = []
         self._loaded = ""
-        self.card = QFrame(self); self.card.setObjectName("modalCard")
         box = QVBoxLayout(self.card); box.setContentsMargins(22, 18, 22, 18); box.setSpacing(12)
         head = QHBoxLayout(); head.setSpacing(8)
         self.title = QLabel("Select a model"); self.title.setObjectName("modalTitle"); head.addWidget(self.title); head.addStretch(1)
@@ -116,11 +121,10 @@ class ModelPicker(QFrame):
         self.eject_button.clicked.connect(self.eject_requested)
         foot.addWidget(self.browse_button); foot.addWidget(self.refresh_button); foot.addStretch(1); foot.addWidget(self.eject_button)
         box.addLayout(foot)
-        self.hide()
 
     # ---- content
     def set_models(self, entries: list[dict], loaded: str = "", *, can_eject: bool = False):
-        """`entries` are dicts with `path`, `title` and `details`; the loaded model is always listed first."""
+        """`entries` are dicts with `path`, `title`, `details` and optionally `needs_runtime`; the loaded model is listed first."""
         self._entries, self._loaded = list(entries), loaded
         self.eject_button.setEnabled(bool(loaded) and can_eject)
         self._populate()
@@ -134,6 +138,7 @@ class ModelPicker(QFrame):
             item = QListWidgetItem(entry["title"])
             item.setData(PATH_ROLE, entry["path"]); item.setData(DETAIL_ROLE, entry["details"])
             item.setData(LOADED_ROLE, entry["path"] == self._loaded); item.setToolTip(entry["path"])
+            item.setData(NEEDS_ROLE, bool(entry.get("needs_runtime")))
             self.list.addItem(item)
         if self.list.count(): self.list.setCurrentRow(0)
         shown = self.list.count() > 0
@@ -166,31 +171,5 @@ class ModelPicker(QFrame):
     def open(self):
         self.search.clear()
         self._populate()
-        self._fit()
-        self.show(); self.raise_()
+        super().open()
         self.search.setFocus()
-
-    def dismiss(self):
-        was_open = self.isVisible()
-        self.hide()
-        if was_open: self.closed.emit()
-
-    def _fit(self):
-        width = max(300, min(self.CARD_WIDTH, self.width() - 2 * self.MARGIN))
-        height = max(300, min(self.CARD_HEIGHT, self.height() - 2 * self.MARGIN))
-        self.card.setGeometry((self.width() - width) // 2, (self.height() - height) // 2, width, height)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._fit()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape: self.dismiss()      # the search box, list and buttons pass unhandled keys up to here
-        else: super().keyPressEvent(event)
-
-    def mousePressEvent(self, event):
-        if not self.card.geometry().contains(event.position().toPoint()): self.dismiss()      # a click on the backdrop closes it
-        event.accept()
-
-    def wheelEvent(self, event):
-        event.accept()                                          # nothing behind the backdrop scrolls while it is open

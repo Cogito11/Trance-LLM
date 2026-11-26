@@ -1,12 +1,12 @@
-"""Settings page: the color theme, the model loaded at launch, and the llama.cpp runtimes."""
+"""Settings page: the color theme, the model loaded at launch, and the runtimes (the Trance engine and llama.cpp)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
-                               QScrollArea, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
+                               QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .theme import PALETTES, PALETTE_INFO
 
@@ -64,6 +64,69 @@ class RuntimeRow(QFrame):
         self.use_button.clicked.connect(lambda: self.use_requested.emit(entry.key))
         self.open_button.clicked.connect(lambda: self.open_requested.emit(str(entry.folder)))
         self.remove_button.clicked.connect(lambda: self.remove_requested.emit(entry.key))
+
+
+class ElidedLabel(QLabel):
+    """A one-line label that cuts long text (a file path) with an ellipsis instead of widening the page."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+    def set_full_text(self, text: str, tooltip: str = ""):
+        self._full = text; self.setToolTip(tooltip or text); self._elide()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def _elide(self):
+        self.setText(self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideMiddle, max(20, self.width())))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+
+class EngineCard(QFrame):
+    """The built-in Trance CUDA engine. Read-only: it ships with the app, so there is nothing to install or choose."""
+    GPU_UNKNOWN = "Detected the first time a Trance model loads"
+
+    def __init__(self, binary: Path, bundled: bool = False, parent=None):
+        super().__init__(parent)
+        self.binary, self.bundled, self._gpu = Path(binary), bundled, ""
+        self.setObjectName("settingsCard")
+        box = QVBoxLayout(self); box.setContentsMargins(18, 16, 18, 16); box.setSpacing(10)
+        head = QHBoxLayout(); head.setSpacing(10)
+        title = QLabel("Trance engine"); title.setObjectName("themeName"); head.addWidget(title)
+        badge = QLabel("Built in"); badge.setObjectName("badge"); head.addWidget(badge); head.addStretch(1); box.addLayout(head)
+        blurb = QLabel("Runs Trance models on your NVIDIA GPU with CUDA. It comes with the app, so there is nothing to download or choose.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True); box.addWidget(blurb)
+        grid = QGridLayout(); grid.setHorizontalSpacing(16); grid.setVerticalSpacing(6); grid.setColumnStretch(1, 1)
+        self.status = QLabel(); self.location = ElidedLabel(); self.gpu = QLabel(); self.gpu.setWordWrap(True)
+        for row, (name, widget) in enumerate((("Status", self.status), ("Location", self.location), ("GPU", self.gpu))):
+            caption = QLabel(name); caption.setObjectName("muted"); grid.addWidget(caption, row, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(widget, row, 1)
+        box.addLayout(grid)
+        self.refresh()
+
+    def set_gpu(self, text: str):
+        """The engine reports its GPU when it starts, e.g. `NVIDIA GeForce RTX 4060 (compute capability 8.9)`."""
+        self._gpu = text.split(" (compute")[0].strip()
+        self.refresh()
+
+    def refresh(self):
+        found = self.binary.is_file()
+        self.status.setText("Ready to use" if found else "Not found. Build it first: nvcc -O3 -o trance trance.cu -lcublas (see the README).")
+        self.status.setObjectName("" if found else "configHint"); self.status.setProperty("bad", not found)
+        self.status.style().unpolish(self.status); self.status.style().polish(self.status)
+        self.location.set_full_text("Bundled with the app" if self.bundled and found else str(self.binary), str(self.binary))
+        self.gpu.setText(self._gpu or (self.GPU_UNKNOWN if found else "Unavailable"))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()                                  # the binary may have been built since the app started
 
 
 class RuntimeCard(QFrame):
@@ -193,7 +256,7 @@ class SettingsPage(QWidget):
     theme_selected = Signal(str)
     default_model_selected = Signal(str)
 
-    def __init__(self, current: str = "teal", parent=None, *, runtimes=None):
+    def __init__(self, current: str = "teal", parent=None, *, runtimes=None, engine_binary=None, engine_bundled=False):
         super().__init__(parent)
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea(); scroll.setObjectName("formScroll"); scroll.setWidgetResizable(True); outer.addWidget(scroll)
@@ -212,9 +275,12 @@ class SettingsPage(QWidget):
         heading = QLabel("MODELS"); heading.setObjectName("eyebrow"); layout.addSpacing(8); layout.addWidget(heading)
         self.default_model_card = DefaultModelCard(); layout.addWidget(self.default_model_card)
         self.default_model_card.selected.connect(self.default_model_selected)
-        self.runtime_card = None
-        if runtimes is not None:
+        self.engine_card = self.runtime_card = None
+        if runtimes is not None or engine_binary is not None:
             heading = QLabel("RUNTIMES"); heading.setObjectName("eyebrow"); layout.addSpacing(8); layout.addWidget(heading)
+        if engine_binary is not None:
+            self.engine_card = EngineCard(engine_binary, engine_bundled); layout.addWidget(self.engine_card)
+        if runtimes is not None:
             self.runtime_card = RuntimeCard(runtimes); layout.addWidget(self.runtime_card)
         layout.addStretch(1)
         self.select(current)

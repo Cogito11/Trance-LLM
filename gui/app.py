@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
 from .backends.llama_server import NO_RUNTIME
 from .backends.router import BackendRouter, backend_kind
 from .gguf import discover_gguf, read_chat_template, read_gguf_info, supports_thinking
+from .runtime import FROZEN
+from .runtime_prompt import RuntimePrompt
 from .runtimes import RuntimeManager
 from . import APP_NAME
 from .storage import ROOT, STATE, atomic_json, read_json, new_chat, completed_context, discover_models, model_info, validate_config
@@ -125,6 +127,7 @@ class MainWindow(QMainWindow):
         self._engine_error = False
         self._closing = False
         self._loading_model = ""        # the model being loaded right now, or ""
+        self._runtime_model = ""        # the GGUF model waiting for a llama.cpp runtime to finish installing
         self.models = []
         self.runtimes = RuntimeManager(self.state_dir, lambda: self.preferences.get("llama_server_path", ""), self._set_llama_path, self,
                                        get_active=lambda: self.preferences.get("llama_runtime", ""), set_active=self._set_llama_runtime)
@@ -244,9 +247,10 @@ class MainWindow(QMainWindow):
         self.config_builder.saved.connect(lambda path:self._use_saved_config(path,show=False))
         self.config_builder.open_training.connect(self._use_saved_config)
         self.documentation=Documentation();self.pages.addWidget(self.documentation)
-        self.settings_page = SettingsPage(self._theme_name, runtimes=self.runtimes); self.pages.addWidget(self.settings_page)
+        self.settings_page = SettingsPage(self._theme_name, runtimes=self.runtimes, engine_binary=self.engine.trance.binary, engine_bundled=FROZEN); self.pages.addWidget(self.settings_page)
         self.settings_page.theme_selected.connect(self._set_theme)
         self.settings_page.default_model_selected.connect(self._set_default_model)
+        self.engine.trance.ready.connect(self.settings_page.engine_card.set_gpu)
         self.settings = QFrame(); self.settings.setObjectName("settings"); self.settings.setFixedWidth(264)
         outer = QVBoxLayout(self.settings); outer.setContentsMargins(0,0,0,0)
         scroll = QScrollArea(); scroll.setObjectName("generationScroll"); scroll.setWidgetResizable(True)
@@ -320,6 +324,14 @@ class MainWindow(QMainWindow):
         self.model_picker.browse_requested.connect(self._browse_model)
         self.model_picker.refresh_requested.connect(self.refresh_models)
         self.model_picker.closed.connect(self._picker_closed)
+        self.runtime_prompt = RuntimePrompt(self); self.runtime_prompt.setGeometry(self.rect())
+        self.runtime_prompt.install_requested.connect(self._install_runtime_for_model)
+        self.runtime_prompt.cancel_install_requested.connect(self.runtimes.cancel_install)
+        self.runtime_prompt.settings_requested.connect(lambda: self._show_page(5))
+        self.runtime_prompt.closed.connect(lambda: setattr(self,"_runtime_model",""))
+        self.runtimes.progress.connect(self.runtime_prompt.show_progress)
+        self.runtimes.install_failed.connect(self.runtime_prompt.show_error)
+        self.runtimes.changed.connect(self._runtimes_changed)
         self.chat_content = QStackedWidget()
         self.transcript = Transcript(); self.chat_content.addWidget(self.transcript)
         temporary_empty = QWidget(); center = QVBoxLayout(temporary_empty); center.setContentsMargins(20,20,20,20)
@@ -469,11 +481,12 @@ class MainWindow(QMainWindow):
 
     def _model_entries(self):
         entries = []
+        missing = self.runtimes.resolve() is None                     # no llama.cpp runtime: GGUF rows say so
         for info in self.models:
             if info.get("kind") == "gguf":
                 quant = f" {info['quantization']}" if info.get("quantization") else ""
                 details = f"GGUF{quant}  \u00b7  {human_size(info['size_bytes'])}  \u00b7  {info['context_length']:,} token context"
-                entries.append({"path":info["path"],"title":info["title"],"details":details})
+                entries.append({"path":info["path"],"title":info["title"],"details":details,"needs_runtime":missing})
             else:
                 details = f"Trance  \u00b7  {info['parameters']/1e6:.1f}M parameters  \u00b7  {info['context_length']:,} token context"
                 entries.append({"path":info["path"],"title":friendly(info["path"]),"details":details})
@@ -503,12 +516,17 @@ class MainWindow(QMainWindow):
     def _picker_closed(self):
         if self.pages.currentIndex() == 0: self.composer.setFocus()
 
-    def _load_model(self, path):
-        """Load a model now, unloading the one in memory. Returns False when nothing was started."""
+    def _load_model(self, path, *, offer_runtime=True):
+        """Load a model now, unloading the one in memory. Returns False when nothing was started.
+
+        A GGUF model with no llama.cpp runtime installed opens the install popup (unless `offer_runtime` is False, as
+        for the launch default, which must not greet the person with a dialog)."""
         if not path or self.engine.busy or self.training_active: return False
         if str(Path(path).resolve()) == self.engine.loaded_model: return True      # already loaded
         if backend_kind(path) == "gguf" and self.runtimes.resolve() is None:
-            self.statusBar().showMessage(NO_RUNTIME); return False
+            self.statusBar().showMessage(NO_RUNTIME)
+            if offer_runtime: self._offer_runtime(path)
+            return False
         self._loading_model, self.operation, self._engine_error = path, "load", False
         self._set_busy(True)
         try: self.engine.load(path)
@@ -517,12 +535,35 @@ class MainWindow(QMainWindow):
             self._set_busy(False); self.statusBar().showMessage(str(error)); return False
         return True
 
+    def _offer_runtime(self, path):
+        """Tell the person a runtime is needed and offer the recommended one, remembering which model to load afterwards."""
+        if self._closing: return
+        self._runtime_model = path
+        name = self._model_name(path)
+        flavor = next((f for f in self.runtimes.flavors if f.id == self.runtimes.recommended()), None)
+        if flavor is None and self.runtimes.flavors: flavor = self.runtimes.flavors[0]
+        self.runtime_prompt.offer(name, flavor=flavor.label if flavor else "", size_mb=flavor.approx_mb if flavor else 0)
+        if self.runtimes.installing: self.runtime_prompt.set_installing()      # already downloading (started in Settings): just wait for it
+        self.runtime_prompt.open()
+
+    def _install_runtime_for_model(self):
+        self.runtime_prompt.set_installing()
+        self.runtimes.start_install(self.runtimes.recommended())
+
+    def _runtimes_changed(self):
+        self._refresh_model_ui()                                                # the "Needs runtime" tags follow what is installed
+        prompt = self.runtime_prompt
+        if prompt.installing and not self.runtimes.installing and self.runtimes.resolve() is not None:
+            path = self._runtime_model
+            prompt.finish()                                                     # installed: close, then load what was picked
+            if path: self._load_model(path)
+
     def _load_default_model(self):
         path = self.preferences.get("default_model","")
         if not path or self.engine.loaded_model or self.engine.busy or self.training_active: return
         if not any(m["path"] == path for m in self.models):
             self.statusBar().showMessage(f"Default model not found: {Path(path).name}"); return
-        self._load_model(path)
+        self._load_model(path, offer_runtime=False)
 
     def _set_default_model(self, path):
         self.preferences["default_model"] = path
@@ -782,7 +823,8 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "model_picker"): self.model_picker.setGeometry(self.rect())
+        for overlay in (getattr(self, "model_picker", None), getattr(self, "runtime_prompt", None)):
+            if overlay is not None: overlay.setGeometry(self.rect())
         if hasattr(self, "suggestion_row") and self._welcome_active: self._fill_suggestions()
 
     def _use_starter(self, prompt):

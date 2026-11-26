@@ -5,6 +5,7 @@ tests/fake_llama_server.py, so the real client code, process handling and window
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -25,6 +26,8 @@ from gui import theme  # noqa: E402
 from gui.app import MainWindow  # noqa: E402
 from gui.backends.router import BackendRouter  # noqa: E402
 from gui.engine import EngineClient  # noqa: E402
+from gui.runtimes import SERVER_NAME, Asset, Flavor  # noqa: E402
+from test_runtimes import FileServer, make_tar  # noqa: E402
 from gui.gguf import read_gguf_info  # noqa: E402
 from gui.runtimes import RuntimeInfo  # noqa: E402
 from gui.storage import atomic_json, new_chat, read_json  # noqa: E402
@@ -504,6 +507,7 @@ class DefaultModelTests(WindowCase):
         with patch("gui.runtimes.RuntimeManager.resolve", return_value=None):
             w = self.window({"default_model": self.gguf[0]["path"]}); QTest.qWait(50)
         self.assertIn("llama.cpp runtime", w.statusBar().currentMessage()); self.assertEqual(w.active_model, "")
+        self.assertFalse(w.runtime_prompt.isVisible())                    # a launch must not greet the person with a dialog
 
     def test_the_default_is_not_loaded_onto_a_gpu_that_is_training(self):
         with patch("gui.engine.EngineClient.load") as load:
@@ -623,6 +627,186 @@ class ChatActionTests(WindowCase):
         source = Path(__file__).resolve().parents[1].joinpath("gui", "app.py").read_text()
         for old in ("Rename chat\u2026", "Delete chat", "Export chat\u2026"):
             self.assertNotIn(f'"{old}"', source)
+
+
+class RuntimePromptTests(WindowCase):
+    """Picking a GGUF model while no llama.cpp runtime is installed."""
+
+    def setUp(self):
+        super().setUp()
+        self.w = self.window()
+        self.w.runtimes._path_lookup = lambda name: None                      # a llama-server on this machine's PATH must not leak in
+        self.w.runtimes.bundled_dir = Path(self.temp.name) / "no-bundled-runtime"
+        self.flavor = Flavor("vulkan", "Vulkan (NVIDIA, AMD, Intel)", "d", (Asset("x.tar.gz", "0" * 64),), 36)
+        self.w.runtimes.flavors = [self.flavor]
+        self.model = self.gguf[0]["path"]
+
+    def pick(self, path=None):
+        with patch.object(self.w.engine, "load") as load:
+            self.w._open_model_picker()
+            QTest.mouseClick(self.w.model_picker.list.viewport(), Qt.MouseButton.LeftButton, pos=self.row(self.w, path or self.model))
+            self.assertFalse(load.called)
+        self.app.processEvents()
+
+    def test_picking_a_gguf_opens_a_popup_that_offers_the_download_and_loads_nothing(self):
+        w = self.w; self.assertIsNone(w.runtimes.resolve())
+        self.pick()
+        prompt = w.runtime_prompt
+        self.assertTrue(prompt.isVisible()); self.assertEqual(w._runtime_model, self.model)
+        self.assertIn("Qwen Tiny", prompt.body.text()); self.assertIn("GGUF", prompt.body.text())
+        self.assertIn("Vulkan (NVIDIA, AMD, Intel)", prompt.detail.text()); self.assertIn("github.com", prompt.detail.text())
+        self.assertEqual(prompt.install_button.text(), "Download (36 MB)")
+        self.assertTrue(prompt.settings_button.isVisibleTo(prompt) and prompt.cancel_button.isVisibleTo(prompt))
+        self.assertEqual((w.model_button.label(), w._busy, w.operation), ("No Model Loaded, Pick one to use", False, None))
+        self.assertIn("llama.cpp runtime", w.statusBar().currentMessage())                # the status line stays as a second cue
+
+    def test_trance_models_never_open_the_popup(self):
+        w = self.w
+        with patch.object(w.engine, "load") as load:
+            w._load_model(self.trance[0]["path"]); load.assert_called_once()
+        self.assertFalse(w.runtime_prompt.isVisible())
+
+    def test_cancel_escape_and_the_backdrop_close_it_and_forget_the_model(self):
+        w = self.w; prompt = w.runtime_prompt
+        for close in (lambda: QTest.mouseClick(prompt.cancel_button, Qt.MouseButton.LeftButton),
+                      lambda: QTest.keyClick(prompt.cancel_button, Qt.Key.Key_Escape),
+                      lambda: QTest.mouseClick(prompt, Qt.MouseButton.LeftButton, pos=QPoint(3, 3))):
+            self.pick(); self.assertTrue(prompt.isVisible()); close()
+            self.assertFalse(prompt.isVisible()); self.assertEqual(w._runtime_model, "")
+        self.assertFalse(w.runtimes.installing)
+
+    def test_open_settings_goes_to_the_runtimes_and_closes_the_popup(self):
+        w = self.w; self.pick()
+        QTest.mouseClick(w.runtime_prompt.settings_button, Qt.MouseButton.LeftButton)
+        self.assertFalse(w.runtime_prompt.isVisible()); self.assertIs(w.pages.currentWidget(), w.settings_page)
+
+    def test_without_a_prebuilt_runtime_only_settings_is_offered(self):
+        w = self.w; w.runtimes.flavors = []; self.pick()
+        prompt = w.runtime_prompt
+        self.assertFalse(prompt.install_button.isVisibleTo(prompt)); self.assertIn("No prebuilt runtime", prompt.detail.text())
+        self.assertEqual(prompt.settings_button.objectName(), "primary")
+
+    def test_download_starts_the_recommended_runtime_and_cannot_be_closed_by_accident(self):
+        w = self.w; self.pick(); prompt = w.runtime_prompt
+        with patch.object(w.runtimes, "start_install") as start, patch.object(w.runtimes, "cancel_install") as cancel:
+            QTest.mouseClick(prompt.install_button, Qt.MouseButton.LeftButton)
+            start.assert_called_once_with("vulkan")
+            self.assertTrue(prompt.installing); self.assertTrue(prompt.progress.isVisibleTo(prompt))
+            self.assertFalse(prompt.install_button.isVisibleTo(prompt)); self.assertEqual(prompt.cancel_button.text(), "Cancel download")
+            self.assertIn("Qwen Tiny", prompt.body.text())
+            QTest.keyClick(prompt.cancel_button, Qt.Key.Key_Escape); QTest.mouseClick(prompt, Qt.MouseButton.LeftButton, pos=QPoint(3, 3))
+            self.assertTrue(prompt.isVisible())                                          # neither abandons the download
+            w.runtimes.progress.emit(24_000_000, 36_000_000, "Downloading 1/1")
+            self.assertEqual((prompt.progress.value(), prompt.progress.maximum()), (24_000_000, 36_000_000))
+            self.assertIn("24 / 36 MB", prompt.progress.format())
+            QTest.mouseClick(prompt.cancel_button, Qt.MouseButton.LeftButton)
+            cancel.assert_called_once()
+        self.assertFalse(prompt.isVisible()); self.assertEqual(w._runtime_model, "")
+
+    def test_a_failed_download_says_why_and_can_be_retried_but_a_cancel_is_quiet(self):
+        w = self.w; self.pick(); prompt = w.runtime_prompt
+        with patch.object(w.runtimes, "start_install"):
+            QTest.mouseClick(prompt.install_button, Qt.MouseButton.LeftButton)
+        w.runtimes.install_failed.emit("Could not reach github.com (timed out).")
+        self.assertTrue(prompt.error.isVisibleTo(prompt)); self.assertIn("Could not reach", prompt.error.text())
+        self.assertEqual(prompt.install_button.text(), "Try again"); self.assertFalse(prompt.installing)
+        self.assertTrue(prompt.isVisible()); self.assertFalse(prompt.progress.isVisibleTo(prompt))
+        QTest.keyClick(prompt.cancel_button, Qt.Key.Key_Escape); self.assertFalse(prompt.isVisible())      # closable again
+        w.runtimes.install_failed.emit("late error after closing"); self.assertFalse(prompt.isVisible())    # nothing pops back up
+        self.pick()
+        with patch.object(w.runtimes, "start_install"):
+            QTest.mouseClick(prompt.install_button, Qt.MouseButton.LeftButton)
+        w.runtimes.install_failed.emit("")                                                 # what a cancelled download reports
+        self.assertFalse(prompt.error.isVisibleTo(prompt)); self.assertTrue(prompt.installing)
+
+    def test_a_download_already_running_from_settings_is_joined(self):
+        w = self.w
+        with patch.object(type(w.runtimes), "installing", property(lambda manager: True)):
+            self.pick()
+        self.assertTrue(w.runtime_prompt.installing); self.assertFalse(w.runtime_prompt.install_button.isVisibleTo(w.runtime_prompt))
+
+    def test_the_picker_tags_gguf_rows_only_while_no_runtime_is_installed(self):
+        w = self.w
+        flags = lambda: {Path(e["path"]).suffix: e.get("needs_runtime") for e in w._model_entries()}
+        self.assertEqual(flags(), {".bin": None, ".gguf": True})                           # Trance rows never carry it
+        with patch.object(w.runtimes, "resolve", return_value=RUNTIME):
+            self.assertEqual(flags(), {".bin": None, ".gguf": False})
+        w._open_model_picker()
+        self.assertEqual(sum(bool(w.model_picker.list.item(i).data(Qt.ItemDataRole.UserRole + 3)) for i in range(w.model_picker.list.count())), 2)
+
+    def test_the_overlays_follow_the_window_size(self):
+        w = self.w; w.resize(1400, 800); self.app.processEvents()
+        self.assertEqual(w.runtime_prompt.geometry(), w.rect()); self.assertEqual(w.model_picker.geometry(), w.rect())
+
+
+class RuntimeInstallFlowTests(WindowCase):
+    """The whole path with a real RuntimeManager: popup -> Download -> installed -> the picked model loads by itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.www = Path(self.temp.name) / "www" / "bTEST"; self.www.mkdir(parents=True)
+        make_tar(self.www / "runtime.tar.gz", {SERVER_NAME: FAKE_SERVER.read_bytes(), "fake_openai.py": (HERE / "fake_openai.py").read_bytes()})
+        digest = hashlib.sha256((self.www / "runtime.tar.gz").read_bytes()).hexdigest()
+        self.files = FileServer(Path(self.temp.name) / "www"); self.addCleanup(self.files.stop)
+        self.w = self.window(binary=FAKE_ENGINE)
+        runtimes = self.w.runtimes
+        runtimes._path_lookup = lambda name: None; runtimes.bundled_dir = Path(self.temp.name) / "no-bundled-runtime"
+        runtimes.flavors = [Flavor("vulkan", "Vulkan", "d", (Asset("runtime.tar.gz", digest),), 1)]
+        runtimes.tag, runtimes.base_url = "bTEST", self.files.url
+
+    def test_download_then_the_model_loads_without_another_click(self):
+        w = self.w; self.assertIsNone(w.runtimes.resolve())
+        w._open_model_picker()
+        QTest.mouseClick(w.model_picker.list.viewport(), Qt.MouseButton.LeftButton, pos=self.row(w, self.gguf[0]["path"]))
+        self.assertTrue(w.runtime_prompt.isVisible())
+        QTest.mouseClick(w.runtime_prompt.install_button, Qt.MouseButton.LeftButton)
+        self.assertTrue(pump(self.app, lambda: not w.runtime_prompt.isVisible() and not w.engine.busy and w.active_model, 40))
+        self.assertEqual((w.model_button.label(), w.active_model), ("Qwen Tiny", self.gguf[0]["path"]))
+        self.assertEqual(w.runtimes.resolve().source, "managed")
+        installed = self.state / "runtimes" / "llama.cpp" / "bTEST-vulkan"                  # inside the project's data folder
+        self.assertTrue((installed / SERVER_NAME).is_file() and (installed / "runtime.json").is_file())
+        self.assertFalse(any(e.get("needs_runtime") for e in w._model_entries()))
+        self.assertEqual(w._runtime_model, ""); self.assertFalse(w._busy)
+        self.assertEqual(count_processes("[b]TEST-vulkan/llama-server"), 1)                 # the downloaded runtime is the one running
+
+    def test_a_download_that_does_not_match_its_hash_is_refused_and_nothing_loads(self):
+        w = self.w
+        w.runtimes.flavors = [Flavor("vulkan", "Vulkan", "d", (Asset("runtime.tar.gz", "f" * 64),), 1)]
+        w._open_model_picker()
+        QTest.mouseClick(w.model_picker.list.viewport(), Qt.MouseButton.LeftButton, pos=self.row(w, self.gguf[0]["path"]))
+        QTest.mouseClick(w.runtime_prompt.install_button, Qt.MouseButton.LeftButton)
+        self.assertTrue(pump(self.app, lambda: w.runtime_prompt.error.isVisibleTo(w.runtime_prompt), 30))
+        self.assertTrue(w.runtime_prompt.isVisible()); self.assertEqual(w.active_model, "")
+        self.assertIsNone(w.runtimes.resolve()); self.assertFalse((self.state / "runtimes" / "llama.cpp" / "bTEST-vulkan").exists())
+
+
+class EngineCardTests(WindowCase):
+    def test_the_trance_engine_is_listed_first_among_the_runtimes_and_is_read_only(self):
+        w = self.window(); page = w.settings_page; card = page.engine_card
+        layout = card.parentWidget().layout()
+        self.assertLess(layout.indexOf(card), layout.indexOf(page.runtime_card))
+        self.assertEqual(card.findChildren(__import__("PySide6.QtWidgets", fromlist=["QPushButton"]).QPushButton), [])
+        self.assertEqual(card.findChild(__import__("PySide6.QtWidgets", fromlist=["QLabel"]).QLabel, "badge").text(), "Built in")
+
+    def test_it_reports_whether_the_binary_is_found_where_it_is_and_the_gpu_once_known(self):
+        engine = Path(self.temp.name) / "trance"
+        w = self.window(binary=engine)
+        card = w.settings_page.engine_card
+        self.assertIn("Not found", card.status.text()); self.assertEqual(card.gpu.text(), "Unavailable")
+        engine.write_bytes(b"x"); card.refresh()
+        self.assertEqual(card.status.text(), "Ready to use"); self.assertEqual(card.location.full_text(), str(engine))
+        self.assertEqual(card.gpu.text(), card.GPU_UNKNOWN)
+        w.engine.trance.ready.emit("NVIDIA GeForce RTX 4060 (compute capability 8.9)")
+        self.assertEqual(card.gpu.text(), "NVIDIA GeForce RTX 4060")
+
+    def test_a_bundled_engine_says_so_and_a_long_path_is_elided_with_the_full_one_in_the_tooltip(self):
+        from gui.settings import EngineCard
+        deep = Path(self.temp.name, *["a-very-long-folder-name"] * 6, "trance"); deep.parent.mkdir(parents=True); deep.write_bytes(b"x")
+        card = EngineCard(deep, bundled=True); card.resize(420, 200); card.show(); self.app.processEvents()
+        self.assertEqual(card.location.full_text(), "Bundled with the app"); self.assertEqual(card.location.toolTip(), str(deep))
+        card.bundled = False; card.refresh(); card.resize(300, 200); self.app.processEvents()
+        self.assertEqual(card.location.full_text(), str(deep)); self.assertLess(len(card.location.text()), len(str(deep)))
+        self.assertIn("\u2026", card.location.text())
 
 
 if __name__ == "__main__":

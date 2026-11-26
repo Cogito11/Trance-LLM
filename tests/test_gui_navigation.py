@@ -421,6 +421,8 @@ class ChatNavigationTests(unittest.TestCase):
                 self.assertFalse(w._load_model(info["path"]))                # refused up front, with the way forward
                 load.assert_not_called()
             self.assertIn("llama.cpp runtime",w.statusBar().currentMessage());self.assertEqual(w._loading_model,"")
+            self.assertTrue(w.runtime_prompt.isVisible());self.assertEqual(w._runtime_model,info["path"])   # and a popup, not only the thin status bar
+            w.runtime_prompt.dismiss()
             self.assertFalse(w._busy)
             self.load_mock(info["path"])                                     # a model already loaded when the runtime goes missing
             self.assertTrue(w.welcome_hint.isVisible())
