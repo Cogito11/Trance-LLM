@@ -656,7 +656,7 @@ class RuntimePromptTests(WindowCase):
         self.assertIn("Qwen Tiny", prompt.body.text()); self.assertIn("GGUF", prompt.body.text())
         self.assertIn("Vulkan (NVIDIA, AMD, Intel)", prompt.detail.text()); self.assertIn("github.com", prompt.detail.text())
         self.assertEqual(prompt.install_button.text(), "Download (36 MB)")
-        self.assertTrue(prompt.settings_button.isVisibleTo(prompt) and prompt.cancel_button.isVisibleTo(prompt))
+        self.assertTrue(prompt.runtimes_button.isVisibleTo(prompt) and prompt.cancel_button.isVisibleTo(prompt))
         self.assertEqual((w.model_button.label(), w._busy, w.operation), ("No Model Loaded, Pick one to use", False, None))
         self.assertIn("llama.cpp runtime", w.statusBar().currentMessage())                # the status line stays as a second cue
 
@@ -675,16 +675,16 @@ class RuntimePromptTests(WindowCase):
             self.assertFalse(prompt.isVisible()); self.assertEqual(w._runtime_model, "")
         self.assertFalse(w.runtimes.installing)
 
-    def test_open_settings_goes_to_the_runtimes_and_closes_the_popup(self):
+    def test_open_runtimes_goes_to_the_runtimes_page_and_closes_the_popup(self):
         w = self.w; self.pick()
-        QTest.mouseClick(w.runtime_prompt.settings_button, Qt.MouseButton.LeftButton)
-        self.assertFalse(w.runtime_prompt.isVisible()); self.assertIs(w.pages.currentWidget(), w.settings_page)
+        QTest.mouseClick(w.runtime_prompt.runtimes_button, Qt.MouseButton.LeftButton)
+        self.assertFalse(w.runtime_prompt.isVisible()); self.assertIs(w.pages.currentWidget(), w.runtimes_page)
 
-    def test_without_a_prebuilt_runtime_only_settings_is_offered(self):
+    def test_without_a_prebuilt_runtime_only_the_runtimes_page_is_offered(self):
         w = self.w; w.runtimes.flavors = []; self.pick()
         prompt = w.runtime_prompt
         self.assertFalse(prompt.install_button.isVisibleTo(prompt)); self.assertIn("No prebuilt runtime", prompt.detail.text())
-        self.assertEqual(prompt.settings_button.objectName(), "primary")
+        self.assertEqual(prompt.runtimes_button.objectName(), "primary")
 
     def test_download_starts_the_recommended_runtime_and_cannot_be_closed_by_accident(self):
         w = self.w; self.pick(); prompt = w.runtime_prompt
@@ -782,7 +782,7 @@ class RuntimeInstallFlowTests(WindowCase):
 
 class EngineCardTests(WindowCase):
     def test_the_trance_engine_is_listed_first_among_the_runtimes_and_is_read_only(self):
-        w = self.window(); page = w.settings_page; card = page.engine_card
+        w = self.window(); page = w.runtimes_page; card = page.engine_card
         layout = card.parentWidget().layout()
         self.assertLess(layout.indexOf(card), layout.indexOf(page.runtime_card))
         self.assertEqual(card.findChildren(__import__("PySide6.QtWidgets", fromlist=["QPushButton"]).QPushButton), [])
@@ -791,7 +791,7 @@ class EngineCardTests(WindowCase):
     def test_it_reports_whether_the_binary_is_found_where_it_is_and_the_gpu_once_known(self):
         engine = Path(self.temp.name) / "trance"
         w = self.window(binary=engine)
-        card = w.settings_page.engine_card
+        card = w.runtimes_page.engine_card
         self.assertIn("Not found", card.status.text()); self.assertEqual(card.gpu.text(), "Unavailable")
         engine.write_bytes(b"x"); card.refresh()
         self.assertEqual(card.status.text(), "Ready to use"); self.assertEqual(card.location.full_text(), str(engine))

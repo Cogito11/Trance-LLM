@@ -19,7 +19,7 @@ from ..gguf import read_gguf_info
 from ..runtime import external_environment
 from .openai_stream import ChatStream, build_payload
 
-NO_RUNTIME = ("GGUF models need the llama.cpp runtime. Install it in Tools \u2192 Settings \u2192 Runtimes, "
+NO_RUNTIME = ("GGUF models need the llama.cpp runtime. Install it in More \u2192 Runtimes, "
               "or choose an existing llama-server there.")
 
 

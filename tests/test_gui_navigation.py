@@ -6,14 +6,15 @@ import tempfile
 import unittest
 from unittest.mock import patch, sentinel
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QUrl
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QMenu, QPushButton
 
 from gui import APP_NAME, theme
 from gui.app import GREETINGS, SUGGESTIONS, MainWindow
 from gui.runtimes import RuntimeInfo
-from gui.widgets import Transcript, round_popup
+from gui.widgets import NoWheelComboBox, Transcript, round_popup
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_gguf import chat_model, write as write_gguf  # noqa: E402
 from gui.storage import read_json, atomic_json, new_chat
@@ -72,13 +73,14 @@ class ChatNavigationTests(unittest.TestCase):
     def test_sidebar_sections_navigate_and_remember_their_last_page(self):
         w=self.window; click=lambda b:QTest.mouseClick(b,Qt.MouseButton.LeftButton)
         self.assertEqual(w.windowTitle(),APP_NAME)
-        self.assertEqual([s.text() for s in w.sections],["Chat","Train","Tools"])
-        self.assertEqual({page:nav.text() for page,nav in w.nav.items()},{2:"Train",3:"Configs",1:"Compare",4:"Documentation",5:"Settings"})
+        self.assertEqual([s.text() for s in w.sections],["Chat","Train","More"])
+        self.assertEqual({page:nav.text() for page,nav in w.nav.items()},
+                         {2:"Train",3:"Configs",1:"Compare",5:"Settings",6:"Runtimes",4:"Documentation"})
         self.assertTrue(w.sections[0].isChecked())
         click(w.sections[1])                      # a section opens its page immediately
         self.assertEqual((w.pages.currentIndex(),w.section_stack.currentIndex()),(2,1))
         click(w.nav[3]);self.assertEqual(w.pages.currentIndex(),3)
-        click(w.sections[2]);self.assertEqual(w.pages.currentIndex(),1)
+        click(w.sections[2]);self.assertEqual((w.pages.currentIndex(),w.section_stack.currentIndex()),(5,2))   # More opens on Settings
         click(w.nav[4]);self.assertEqual(w.pages.currentIndex(),4)
         click(w.sections[1]);self.assertEqual(w.pages.currentIndex(),3)   # remembered
         click(w.sections[2]);self.assertEqual(w.pages.currentIndex(),4)   # remembered
@@ -88,6 +90,44 @@ class ChatNavigationTests(unittest.TestCase):
         self.assertTrue(w.new_chat_button.isChecked())
         self.assertTrue(w.sections[0].isChecked())
         self.assertFalse(w.sections[2].isChecked())
+
+    def test_compare_lives_in_the_train_section_and_more_holds_settings_runtimes_and_documentation(self):
+        w=self.window; click=lambda b:QTest.mouseClick(b,Qt.MouseButton.LeftButton)
+        click(w.sections[1]);click(w.nav[1])
+        self.assertEqual((w.pages.currentIndex(),w.section_stack.currentIndex()),(1,1))
+        self.assertTrue(w.sections[1].isChecked());self.assertFalse(w.sections[2].isChecked())
+        self.assertTrue(w.nav[1].isChecked());self.assertTrue(w.settings.isVisibleTo(w))     # the generation panel still follows Compare
+        click(w.sections[0]);click(w.sections[1]);self.assertEqual(w.pages.currentIndex(),1)  # Train remembers Compare
+        train_panel=w.section_stack.widget(1);more_panel=w.section_stack.widget(2)
+        self.assertIn(w.nav[1],train_panel.findChildren(QPushButton))
+        self.assertEqual([b.text() for b in more_panel.findChildren(QPushButton)],["Settings","Runtimes","Documentation"])
+        click(w.sections[2]);click(w.nav[6]);self.assertEqual(w.pages.currentIndex(),6)
+        self.assertIs(w.pages.currentWidget(),w.runtimes_page)
+
+    def test_settings_holds_appearance_and_the_default_model_while_runtimes_hold_the_engines(self):
+        w=self.window;settings,runtimes=w.settings_page,w.runtimes_page
+        self.assertTrue(settings.cards);self.assertIsNotNone(settings.default_model_card)
+        self.assertFalse(hasattr(settings,"runtime_card"));self.assertFalse(hasattr(settings,"engine_card"))
+        self.assertTrue(runtimes.isAncestorOf(runtimes.engine_card) and runtimes.isAncestorOf(runtimes.runtime_card))
+        self.assertFalse(hasattr(runtimes,"default_model_card"));self.assertFalse(hasattr(runtimes,"cards"))
+
+    def test_closed_drop_downs_ignore_the_mouse_wheel_so_a_setting_cannot_change_by_scrolling(self):
+        w=self.window;w.show()
+        w.settings_page.set_models([("/m/a.bin","Model A"),("/m/b.bin","Model B")],"/m/a.bin")
+        combos=w.findChildren(QComboBox);self.assertGreater(len(combos),3)
+        for combo in combos:
+            self.assertIsInstance(combo,NoWheelComboBox,combo.accessibleName() or combo.objectName())
+            self.assertEqual(combo.focusPolicy(),Qt.FocusPolicy.StrongFocus)
+        default=w.settings_page.default_model_card.combo;self.assertEqual(default.count(),3)
+        for combo in (default,w.compare_a,w.compare_b,w.config_combo,w.config_builder.preset):
+            if combo.count()<2: combo.addItem("another","x")
+            before=combo.currentIndex()
+            for delta in (-120,120):
+                event=QWheelEvent(QPointF(5,5),QPointF(5,5),QPoint(0,0),QPoint(0,delta),Qt.MouseButton.NoButton,
+                                  Qt.KeyboardModifier.NoModifier,Qt.ScrollPhase.NoScrollPhase,False)
+                combo.wheelEvent(event)
+                self.assertFalse(event.isAccepted())             # left for the surrounding scroll area
+                self.assertEqual(combo.currentIndex(),before,combo.accessibleName() or combo.objectName())
 
     def test_temporary_chat_keeps_context_but_never_enters_disk_history(self):
         saved=read_json(self.state/"chats.json",[])
@@ -451,22 +491,9 @@ class ChatNavigationTests(unittest.TestCase):
             self.window._browse_model()                                   # unreadable files only produce a message
         self.assertIn("GGUF",self.window.statusBar().currentMessage()+"GGUF")
 
-    def test_runtime_card_downloads_and_cancels_through_the_manager(self):
-        w=self.window;card=w.settings_page.runtime_card;manager=w.runtimes
-        self.assertEqual(card.flavor.count(),len(manager.flavors))
-        self.assertIn("(recommended)",card.flavor.itemText(card.flavor.currentIndex()))
-        self.assertTrue(card.flavor_detail.text())
-        with patch.object(manager,"start_install") as start:
-            QTest.mouseClick(card.install_button,Qt.MouseButton.LeftButton)
-            start.assert_called_once_with(card.flavor.currentData())
-        with patch.object(type(manager),"installing",property(lambda self:True)),patch.object(manager,"cancel_install") as cancel:
-            card.refresh()
-            self.assertEqual(card.install_button.text(),"Cancel");self.assertFalse(card.flavor.isEnabled());self.assertFalse(card.choose_button.isEnabled())
-            QTest.mouseClick(card.install_button,Qt.MouseButton.LeftButton);cancel.assert_called_once()
-        card.refresh();self.assertEqual(card.install_button.text(),"Download")
-        manager.install_failed.emit("Checksum mismatch");self.assertTrue(card.error.isVisibleTo(card));self.assertIn("Checksum",card.error.text())
-        card._progress(5_000_000,20_000_000,"Downloading 1/2");self.assertEqual((card.progress.value(),card.progress.maximum()),(5_000_000,20_000_000))
-        self.assertIn("5 / 20 MB",card.progress.format())
+    def runtime_card(self):
+        w=self.window;w.runtimes._path_lookup=lambda name:None;w.runtimes.refresh()
+        return w.runtimes_page.runtime_card,w.runtimes
 
     def fake_download(self,flavor,tag="bTEST",installed=1.0):
         folder=self.state/"runtimes"/"llama.cpp"/f"{tag}-{flavor}";folder.mkdir(parents=True)
@@ -474,44 +501,92 @@ class ChatNavigationTests(unittest.TestCase):
         (folder/"runtime.json").write_text(json.dumps({"tag":tag,"flavor":flavor,"binary":"llama-server","installed":installed}))
         return folder
 
-    def test_installed_runtimes_are_listed_with_name_path_and_actions(self):
-        w=self.window;card=w.settings_page.runtime_card;manager=w.runtimes
-        manager._path_lookup=lambda name:None
+    def test_every_available_runtime_is_listed_and_only_missing_ones_offer_download(self):
+        card,manager=self.runtime_card()
+        self.assertGreater(len(manager.flavors),1)
+        self.assertEqual(list(card.rows),[manager.install_key(f.id) for f in manager.flavors])      # the whole catalog, none installed yet
+        self.assertFalse(hasattr(card,"flavor"));self.assertFalse(hasattr(card,"install_button"))   # no drop-down any more
+        recommended=[k for k,r in card.rows.items() if r.recommended_badge.isVisibleTo(r)]
+        self.assertEqual(recommended,[manager.install_key(manager.recommended())])
+        for flavor in manager.flavors:
+            row=card.rows[manager.install_key(flavor.id)]
+            self.assertEqual(row.name_label.text(),flavor.label);self.assertIn(f"~{flavor.approx_mb} MB",row.path_label.text())
+            self.assertTrue(row.download_button.isVisibleTo(row));self.assertEqual(row.download_button.text(),"Download")
+            for hidden in (row.open_button,row.remove_button,row.use_button,row.badge,row.progress):
+                self.assertFalse(hidden.isVisibleTo(row))
+        row=card.rows[manager.install_key("cuda12")]
+        with patch.object(manager,"start_install") as start:
+            QTest.mouseClick(row.download_button,Qt.MouseButton.LeftButton)
+            start.assert_called_once_with("cuda12")
+
+    def test_installed_runtimes_swap_download_for_use_open_folder_and_remove(self):
+        card,manager=self.runtime_card();tag=manager.tag
+        cpu=self.fake_download("cpu",tag=tag,installed=1.0);vulkan=self.fake_download("vulkan",tag=tag,installed=2.0)
         manager.refresh()
-        self.assertEqual(card.rows,{});self.assertTrue(card.empty.isVisibleTo(card));self.assertIn("Nothing installed",card.empty.text())
-        cpu=self.fake_download("cpu",installed=1.0);vulkan=self.fake_download("vulkan",installed=2.0)
-        manager.refresh()
-        self.assertFalse(card.empty.isVisibleTo(card))
-        self.assertEqual(list(card.rows),["managed:bTEST-vulkan","managed:bTEST-cpu"])
-        newest,older=card.rows["managed:bTEST-vulkan"],card.rows["managed:bTEST-cpu"]
-        self.assertIn("Vulkan",newest.name_label.text());self.assertIn("bTEST",newest.name_label.text())
+        self.assertEqual(list(card.rows),[manager.install_key(f.id) for f in manager.flavors])      # same list, same order
+        newest,older=card.rows[manager.install_key("vulkan")],card.rows[manager.install_key("cpu")]
         self.assertIn(str(vulkan/"llama-server"),newest.path_label.text());self.assertIn("2 MB",newest.path_label.text())
+        for row in (newest,older):
+            self.assertFalse(row.download_button.isVisibleTo(row));self.assertTrue(row.open_button.isVisibleTo(row))
+            self.assertEqual((row.remove_button.text(),row.remove_button.isVisibleTo(row)),("Remove",True))
         self.assertTrue(newest.badge.isVisibleTo(newest));self.assertFalse(older.badge.isVisibleTo(older))
         self.assertFalse(newest.use_button.isVisibleTo(newest));self.assertTrue(older.use_button.isVisibleTo(older))
-        self.assertEqual((newest.remove_button.text(),newest.remove_button.isVisibleTo(newest)),("Remove",True))
+        missing=card.rows[manager.install_key("cuda12")]
+        self.assertTrue(missing.download_button.isVisibleTo(missing));self.assertFalse(missing.open_button.isVisibleTo(missing))
         with patch("gui.settings.QDesktopServices.openUrl") as opened:
             QTest.mouseClick(older.open_button,Qt.MouseButton.LeftButton)
             self.assertEqual(opened.call_args.args[0].toLocalFile(),str(cpu))
         QTest.mouseClick(older.use_button,Qt.MouseButton.LeftButton)
-        self.assertEqual(read_json(self.state/"settings.json")["llama_runtime"],"bTEST-cpu")
-        self.assertTrue(card.rows["managed:bTEST-cpu"].badge.isVisibleTo(card))
-        self.assertFalse(card.rows["managed:bTEST-vulkan"].badge.isVisibleTo(card))
-        QTest.mouseClick(card.rows["managed:bTEST-vulkan"].remove_button,Qt.MouseButton.LeftButton)
+        self.assertEqual(read_json(self.state/"settings.json")["llama_runtime"],f"{tag}-cpu")
+        self.assertTrue(card.rows[manager.install_key("cpu")].badge.isVisibleTo(card))
+        self.assertFalse(card.rows[manager.install_key("vulkan")].badge.isVisibleTo(card))
+        QTest.mouseClick(card.rows[manager.install_key("vulkan")].remove_button,Qt.MouseButton.LeftButton)
         self.assertFalse(vulkan.exists());self.assertTrue(cpu.exists())
-        self.assertEqual(list(card.rows),["managed:bTEST-cpu"])
+        gone=card.rows[manager.install_key("vulkan")]                                              # still listed, offering Download again
+        self.assertTrue(gone.download_button.isVisibleTo(gone));self.assertFalse(gone.remove_button.isVisibleTo(gone))
+
+    def test_a_download_shows_progress_and_cancel_on_its_own_row_and_holds_the_others(self):
+        card,manager=self.runtime_card();vulkan=manager.install_key("vulkan")
+        with patch.object(type(manager),"installing",property(lambda self:True)),patch.object(manager,"cancel_install") as cancel:
+            manager._installing_flavor="vulkan";card.refresh()
+            busy=card.rows[vulkan]
+            self.assertEqual(busy.download_button.text(),"Cancel");self.assertTrue(busy.progress.isVisibleTo(busy));self.assertTrue(busy.isEnabled())
+            for key,row in card.rows.items():
+                if key!=vulkan: self.assertFalse(row.isEnabled(),key);self.assertFalse(row.progress.isVisibleTo(row))
+            self.assertFalse(card.choose_button.isEnabled())
+            manager.progress.emit(5_000_000,20_000_000,"Downloading 1/2")
+            self.assertEqual((busy.progress.value(),busy.progress.maximum()),(5_000_000,20_000_000));self.assertIn("5 / 20 MB",busy.progress.format())
+            QTest.mouseClick(busy.download_button,Qt.MouseButton.LeftButton);cancel.assert_called_once()
+        manager._installing_flavor="";card.refresh()
+        self.assertEqual(card.rows[vulkan].download_button.text(),"Download");self.assertTrue(card.choose_button.isEnabled())
+        manager.install_failed.emit("Checksum mismatch");self.assertTrue(card.error.isVisibleTo(card));self.assertIn("Checksum",card.error.text())
+
+    def test_other_builds_stay_manageable_beside_the_catalog(self):
+        card,manager=self.runtime_card()
+        old=self.fake_download("cpu",tag="bOLD")
+        manager.refresh()
+        row=card.rows["managed:bOLD-cpu"]
+        self.assertEqual(list(card.rows)[-1],"managed:bOLD-cpu");self.assertIn("bOLD",row.name_label.text())
+        self.assertEqual(card.list_box.indexOf(row),len(manager.flavors))                          # after the catalog, in the same list
+        QTest.mouseClick(row.remove_button,Qt.MouseButton.LeftButton)
+        self.assertFalse(old.exists());self.assertNotIn("managed:bOLD-cpu",card.rows)
 
     def test_choosing_an_existing_llama_server_adds_a_row_that_can_be_dropped(self):
-        w=self.window;card=w.settings_page.runtime_card;w.runtimes._path_lookup=lambda name:None
+        card,manager=self.runtime_card()
+        self.assertTrue(card.external_empty.isVisibleTo(card))
         binary=self.state/"my-llama-server";binary.write_bytes(b"#!/bin/sh\n");binary.chmod(0o755)
         with patch("gui.settings.QFileDialog.getOpenFileName",return_value=(str(binary),"")):
             QTest.mouseClick(card.choose_button,Qt.MouseButton.LeftButton)
         self.assertEqual(read_json(self.state/"settings.json")["llama_server_path"],str(binary))
-        row=card.rows["custom"]
+        row=card.rows["custom"];self.assertFalse(card.external_empty.isVisibleTo(card))
+        self.assertGreaterEqual(card.external_box.indexOf(row),0)                                  # listed under "already on this computer"
         self.assertIn("Your chosen llama-server",row.name_label.text());self.assertIn(str(binary),row.path_label.text())
         self.assertTrue(row.badge.isVisibleTo(row));self.assertEqual(row.remove_button.text(),"Stop using")
+        self.assertFalse(row.download_button.isVisibleTo(row))
         QTest.mouseClick(row.remove_button,Qt.MouseButton.LeftButton)
         self.assertEqual(read_json(self.state/"settings.json")["llama_server_path"],"")
         self.assertNotIn("custom",card.rows);self.assertTrue(binary.exists(),"stopping use never deletes the user's file")
+        self.assertTrue(card.external_empty.isVisibleTo(card))
 
     def test_other_backends_without_trance_fields_do_not_break_the_message_flow(self):
         w=self.window

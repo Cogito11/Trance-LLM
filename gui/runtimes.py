@@ -378,6 +378,7 @@ class RuntimeManager(QObject):
         self._path_lookup = path_lookup
         self._thread: _InstallThread | None = None
         self._probe: _VersionThread | None = None
+        self._installing_flavor = ""                    # the flavor id being downloaded right now, or ""
 
     # -- discovery
     def _downloads(self) -> list[tuple[Path, dict]]:
@@ -482,6 +483,15 @@ class RuntimeManager(QObject):
     def installing(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
 
+    @property
+    def installing_flavor(self) -> str:
+        """The flavor id of the download in progress, or \"\" when nothing is downloading."""
+        return self._installing_flavor if self.installing else ""
+
+    def install_key(self, flavor_id: str) -> str:
+        """The key `installed()` gives a download of this flavor at the pinned build."""
+        return f"managed:{self.tag}-{flavor_id}"
+
     def recommended(self) -> str:
         return recommend(self.flavors, nvidia=detect_nvidia(), vulkan=detect_vulkan()) if self.flavors else ""
 
@@ -504,6 +514,7 @@ class RuntimeManager(QObject):
         if flavor is None:
             self.install_failed.emit("That runtime is not available for this system."); return
         self.root.mkdir(parents=True, exist_ok=True)
+        self._installing_flavor = flavor.id
         self._thread = _InstallThread(flavor, self.root / f"{self.tag}-{flavor.id}", self.tag, self.base_url, self)
         self._thread.progress.connect(self.progress)
         self._thread.done.connect(self._installed)
@@ -514,13 +525,13 @@ class RuntimeManager(QObject):
         if self.installing: self._thread.cancel()
 
     def _installed(self, _dest):
-        self._thread.wait(); self._thread = None
+        self._thread.wait(); self._thread = None; self._installing_flavor = ""
         if self._get_custom(): self._set_custom("")   # a fresh download is an explicit choice; stop preferring the old path
         self._set_active(Path(_dest).name)           # and use what was just installed
         self.refresh()
 
     def _install_failed(self, message):
-        self._thread.wait(); self._thread = None
+        self._thread.wait(); self._thread = None; self._installing_flavor = ""
         self.changed.emit()
         if message: self.install_failed.emit(message)
 

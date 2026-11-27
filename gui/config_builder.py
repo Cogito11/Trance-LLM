@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QFormLayout,QLabe
     QComboBox,QPushButton,QSpinBox,QDoubleSpinBox,QTabWidget,QPlainTextEdit,QFileDialog,QScrollArea)
 
 from . import storage
+from .widgets import NoWheelComboBox
 
 INTEGER_FIELDS = {
     "vocab_size":("Vocabulary size",259,1024,"Number of byte and BPE tokens. Trance supports 259–1024."),
@@ -69,7 +70,7 @@ class ConfigBuilder(QWidget):
         super().__init__(parent);self.root=Path(root or storage.ROOT);self.fields={};self._loading=False;self.saved_path=None
         layout=QVBoxLayout(self);layout.setContentsMargins(30,28,30,24);layout.setSpacing(16)
         title=QLabel("Create a config");title.setObjectName("title");layout.addWidget(title)
-        row=QHBoxLayout();self.preset=QComboBox();self.preset.addItems(["Small experiment","Tiny learning model","Trance 1.2 architecture"])
+        row=QHBoxLayout();self.preset=NoWheelComboBox();self.preset.addItems(["Small experiment","Tiny learning model","Trance 1.2 architecture"])
         row.addWidget(self.preset,1);load=QPushButton("Load template…");load.clicked.connect(self._load_template);row.addWidget(load);layout.addLayout(row)
         row=QHBoxLayout();row.addWidget(QLabel("Config name"));self.name=QLineEdit("trance-experiment");row.addWidget(self.name,1);layout.addLayout(row)
         self.tabs=QTabWidget();layout.addWidget(self.tabs,1)

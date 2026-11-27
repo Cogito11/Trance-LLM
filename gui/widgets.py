@@ -128,6 +128,22 @@ class DropdownButton(QPushButton):
         painter.drawPolyline([QPointF(cx - 4, cy - 2), QPointF(cx, cy + 2), QPointF(cx + 4, cy - 2)])
 
 
+class NoWheelComboBox(QComboBox):
+    """A drop-down that only changes when it is opened and a row is chosen, never from the mouse wheel.
+
+    Qt lets the wheel flip through a closed combo box's items, which silently changes a setting while the person is
+    only scrolling the page. Ignoring the event hands it to the surrounding scroll area instead, so the page scrolls
+    as expected. The open list is a separate popup window and keeps its own wheel scrolling.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)      # the default (WheelFocus) lets the wheel take keyboard focus too
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class Composer(QPlainTextEdit):
     submitted = Signal()
 

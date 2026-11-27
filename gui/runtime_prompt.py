@@ -1,7 +1,7 @@
 """The popup shown when a GGUF model is picked but no llama.cpp runtime is installed.
 
 It offers to download the recommended runtime right there (and the window then loads the model that was picked), or to
-go to Settings. The window decides what each button does; this widget only shows the choices and the download's progress.
+go to the Runtimes page. The window decides what each button does; this widget only shows the choices and the download's progress.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from .modal import ModalOverlay
 class RuntimePrompt(ModalOverlay):
     install_requested = Signal()
     cancel_install_requested = Signal()
-    settings_requested = Signal()
+    runtimes_requested = Signal()
 
     CARD_WIDTH = 480
 
@@ -31,18 +31,18 @@ class RuntimePrompt(ModalOverlay):
         self.error.setWordWrap(True); self.error.setVisible(False); box.addWidget(self.error)
         box.addSpacing(4)
         row = QHBoxLayout(); row.setSpacing(8)
-        self.settings_button = QPushButton("Open Settings"); self.cancel_button = QPushButton("Cancel")
+        self.runtimes_button = QPushButton("Open Runtimes"); self.cancel_button = QPushButton("Cancel")
         self.install_button = QPushButton("Download"); self.install_button.setObjectName("primary")
-        for b in (self.settings_button, self.cancel_button, self.install_button): b.setCursor(Qt.CursorShape.PointingHandCursor)
-        row.addWidget(self.settings_button); row.addStretch(1); row.addWidget(self.cancel_button); row.addWidget(self.install_button)
+        for b in (self.runtimes_button, self.cancel_button, self.install_button): b.setCursor(Qt.CursorShape.PointingHandCursor)
+        row.addWidget(self.runtimes_button); row.addStretch(1); row.addWidget(self.cancel_button); row.addWidget(self.install_button)
         box.addLayout(row)
         self.install_button.clicked.connect(self.install_requested)
-        self.settings_button.clicked.connect(self._settings)
+        self.runtimes_button.clicked.connect(self._runtimes)
         self.cancel_button.clicked.connect(self._cancel)
 
     # ---- states
     def offer(self, model: str, *, flavor: str = "", size_mb: int = 0):
-        """Explain what is missing. With no `flavor` there is nothing to download on this system, only Settings."""
+        """Explain what is missing. With no `flavor` there is nothing to download on this system, only the Runtimes page."""
         self.installing, self._model = False, model
         self.title.setText("Install the llama.cpp runtime")
         self.body.setText(f"\u201c{model}\u201d is a GGUF model. GGUF models run on the llama.cpp runtime, which isn\u2019t installed yet.")
@@ -50,7 +50,7 @@ class RuntimePrompt(ModalOverlay):
             self.detail.setText(f"Download it now ({flavor}, about {size_mb} MB) and {model} will load as soon as it\u2019s ready. "
                                 "This contacts github.com; the files are checked against SHA-256 hashes built into the app before they are unpacked.")
         else:
-            self.detail.setText("No prebuilt runtime is available for this system. In Settings you can choose a llama-server you already have.")
+            self.detail.setText("No prebuilt runtime is available for this system. On the Runtimes page you can choose a llama-server you already have.")
         self.install_button.setText(f"Download ({size_mb} MB)" if size_mb else "Download")
         self._show(downloadable=bool(flavor))
         self.error.setVisible(False)
@@ -62,7 +62,7 @@ class RuntimePrompt(ModalOverlay):
         self.error.setVisible(False)
         self.progress.setRange(0, 0); self.progress.setFormat("Starting\u2026"); self.progress.setVisible(True)
         self.cancel_button.setText("Cancel download")
-        for b in (self.install_button, self.settings_button): b.setVisible(False)
+        for b in (self.install_button, self.runtimes_button): b.setVisible(False)
         self.detail.setText("The model loads as soon as the runtime is ready.")
 
     def show_progress(self, done: int, total: int, text: str):
@@ -93,14 +93,14 @@ class RuntimePrompt(ModalOverlay):
         self.progress.setVisible(False)
         self.cancel_button.setText("Cancel")
         self.install_button.setVisible(downloadable)
-        self.settings_button.setVisible(True)
-        self.settings_button.setObjectName("primary" if not downloadable else "")
-        self.settings_button.style().unpolish(self.settings_button); self.settings_button.style().polish(self.settings_button)
+        self.runtimes_button.setVisible(True)
+        self.runtimes_button.setObjectName("primary" if not downloadable else "")
+        self.runtimes_button.style().unpolish(self.runtimes_button); self.runtimes_button.style().polish(self.runtimes_button)
 
     # ---- buttons
-    def _settings(self):
+    def _runtimes(self):
         self._close()
-        self.settings_requested.emit()
+        self.runtimes_requested.emit()
 
     def _cancel(self):
         if self.installing:

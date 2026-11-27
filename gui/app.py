@@ -28,11 +28,12 @@ from .runtimes import RuntimeManager
 from . import APP_NAME
 from .storage import ROOT, STATE, atomic_json, read_json, new_chat, completed_context, discover_models, model_info, validate_config
 from .training import EventTail, latest_run, launch_training, stop_training, run_alive, recent_runs
-from .widgets import Composer, Transcript, LossChart, ConversationList, DropdownButton, dot_icon, round_popup, style_combo_popup, STYLE
+from .widgets import (Composer, Transcript, LossChart, ConversationList, DropdownButton, NoWheelComboBox, dot_icon, round_popup,
+                      style_combo_popup, STYLE)
 from .model_picker import ModelPicker
 from . import theme
 from .config_builder import ConfigBuilder, parameter_count
-from .settings import SettingsPage
+from .settings import RuntimesPage, SettingsPage
 from .documentation import Documentation
 from .theme import COLORS as C
 
@@ -118,7 +119,7 @@ class MainWindow(QMainWindow):
         self.tail = None
         self.training_active = False
         self.training_base_step = 0
-        self.section_last = {0: 0, 1: 2, 2: 1}  # last page opened in each sidebar section
+        self.section_last = {0: 0, 1: 2, 2: 5}  # last page opened in each sidebar section
         self._busy = False
         self._last_render = 0.0
         self._think_started = 0.0
@@ -183,7 +184,7 @@ class MainWindow(QMainWindow):
         bar = QFrame(); bar.setObjectName("segBar")
         bar_layout = QHBoxLayout(bar); bar_layout.setContentsMargins(3,3,3,3); bar_layout.setSpacing(2)
         self.sections = []
-        for i, name in enumerate(("Chat","Train","Tools")):
+        for i, name in enumerate(("Chat","Train","More")):
             seg = button(name, lambda checked=False, section=i: self._open_section(section))
             seg.setObjectName("seg"); seg.setCheckable(True); seg.setCursor(Qt.CursorShape.PointingHandCursor)
             bar_layout.addWidget(seg,1); self.sections.append(seg)
@@ -219,7 +220,7 @@ class MainWindow(QMainWindow):
         chat_box.addWidget(self.chat_search); chat_box.addWidget(self.chat_list,1); chat_box.addWidget(self.chat_empty,1,Qt.AlignmentFlag.AlignTop)
 
         train_box = panel()
-        nav_button(train_box,2,"Train"); nav_button(train_box,3,"Configs")
+        nav_button(train_box,2,"Train"); nav_button(train_box,3,"Configs"); nav_button(train_box,1,"Compare")
         train_box.addSpacing(6); train_box.addWidget(label("RECENT RUNS","eyebrow"))
         self.run_list = QListWidget(); self.run_list.setObjectName("runList")
         self.run_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); self.run_list.setTextElideMode(Qt.TextElideMode.ElideRight)
@@ -227,8 +228,8 @@ class MainWindow(QMainWindow):
         self.run_empty = label("No training runs yet", "muted"); self.run_empty.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         train_box.addWidget(self.run_list,1); train_box.addWidget(self.run_empty,1,Qt.AlignmentFlag.AlignTop)
 
-        tools_box = panel()
-        nav_button(tools_box,1,"Compare"); nav_button(tools_box,4,"Documentation"); nav_button(tools_box,5,"Settings"); tools_box.addStretch(1)
+        more_box = panel()
+        nav_button(more_box,5,"Settings"); nav_button(more_box,6,"Runtimes"); nav_button(more_box,4,"Documentation"); more_box.addStretch(1)
 
         card = QFrame(); card.setObjectName("statusCard")
         card_layout = QHBoxLayout(card); card_layout.setContentsMargins(12,10,12,10); card_layout.setSpacing(10)
@@ -247,10 +248,11 @@ class MainWindow(QMainWindow):
         self.config_builder.saved.connect(lambda path:self._use_saved_config(path,show=False))
         self.config_builder.open_training.connect(self._use_saved_config)
         self.documentation=Documentation();self.pages.addWidget(self.documentation)
-        self.settings_page = SettingsPage(self._theme_name, runtimes=self.runtimes, engine_binary=self.engine.trance.binary, engine_bundled=FROZEN); self.pages.addWidget(self.settings_page)
+        self.settings_page = SettingsPage(self._theme_name); self.pages.addWidget(self.settings_page)
         self.settings_page.theme_selected.connect(self._set_theme)
         self.settings_page.default_model_selected.connect(self._set_default_model)
-        self.engine.trance.ready.connect(self.settings_page.engine_card.set_gpu)
+        self.runtimes_page = RuntimesPage(self.runtimes, self.engine.trance.binary, engine_bundled=FROZEN); self.pages.addWidget(self.runtimes_page)
+        self.engine.trance.ready.connect(self.runtimes_page.engine_card.set_gpu)
         self.settings = QFrame(); self.settings.setObjectName("settings"); self.settings.setFixedWidth(264)
         outer = QVBoxLayout(self.settings); outer.setContentsMargins(0,0,0,0)
         scroll = QScrollArea(); scroll.setObjectName("generationScroll"); scroll.setWidgetResizable(True)
@@ -327,7 +329,7 @@ class MainWindow(QMainWindow):
         self.runtime_prompt = RuntimePrompt(self); self.runtime_prompt.setGeometry(self.rect())
         self.runtime_prompt.install_requested.connect(self._install_runtime_for_model)
         self.runtime_prompt.cancel_install_requested.connect(self.runtimes.cancel_install)
-        self.runtime_prompt.settings_requested.connect(lambda: self._show_page(5))
+        self.runtime_prompt.runtimes_requested.connect(lambda: self._show_page(6))
         self.runtime_prompt.closed.connect(lambda: setattr(self,"_runtime_model",""))
         self.runtimes.progress.connect(self.runtime_prompt.show_progress)
         self.runtimes.install_failed.connect(self.runtime_prompt.show_error)
@@ -370,7 +372,7 @@ class MainWindow(QMainWindow):
 
     def _build_compare(self):
         _, box = self._page("Compare models")
-        row = QHBoxLayout(); self.compare_a = QComboBox(); self.compare_b = QComboBox()
+        row = QHBoxLayout(); self.compare_a = NoWheelComboBox(); self.compare_b = NoWheelComboBox()
         row.addWidget(label("Model A")); row.addWidget(self.compare_a,1); row.addWidget(label("Model B")); row.addWidget(self.compare_b,1); box.addLayout(row)
         self.compare_hint = label("Trance 1.2 will appear here once it has been trained.","muted"); self.compare_hint.setWordWrap(True); box.addWidget(self.compare_hint)
         self.compare_prompt = Composer(); self.compare_prompt.setMaximumHeight(105); self.compare_prompt.setPlaceholderText("Enter a prompt to compare both models…"); self.compare_prompt.submitted.connect(self._start_compare); box.addWidget(self.compare_prompt)
@@ -386,7 +388,7 @@ class MainWindow(QMainWindow):
 
     def _build_training(self):
         _, box = self._page("Train Trance")
-        row = QHBoxLayout(); self.config_combo = QComboBox()
+        row = QHBoxLayout(); self.config_combo = NoWheelComboBox()
         for path in sorted((ROOT/"configs").glob("*.json")):
             self.config_combo.addItem(path.name,str(path))
         index = self.config_combo.findData(str(ROOT/"configs/trance1.2_30m.json"))
@@ -424,7 +426,7 @@ class MainWindow(QMainWindow):
         self.config_editor.textChanged.connect(self._validate_editor)
         self._load_config()
 
-    SECTION_OF_PAGE = {0: 0, 2: 1, 3: 1, 1: 2, 4: 2, 5: 2}  # page index -> sidebar section
+    SECTION_OF_PAGE = {0: 0, 2: 1, 3: 1, 1: 1, 4: 2, 5: 2, 6: 2}  # page index -> sidebar section
 
     def _open_section(self, section):
         self._show_page(self.section_last[section])
@@ -790,7 +792,7 @@ class MainWindow(QMainWindow):
         if self._loading_model: text = "Loading the model\u2026"
         elif not model: text = "Choose a model above to get started."
         elif backend_kind(model) == "gguf" and self.runtimes.resolve() is None:
-            text = "This model needs the llama.cpp runtime. Install it in Tools \u2192 Settings."
+            text = "This model needs the llama.cpp runtime. Install it in More \u2192 Runtimes."
         else: text = ""
         hint.setText(text); hint.setVisible(bool(text))
 
@@ -1227,7 +1229,7 @@ class MainWindow(QMainWindow):
 def main():
     parser=argparse.ArgumentParser(description="Trance LLM desktop GUI")
     parser.add_argument("--screenshot",type=Path,help="Render the app to a PNG and exit; no model computation")
-    parser.add_argument("--page",choices=("chat","compare","training","configs","docs","settings"),default="chat")
+    parser.add_argument("--page",choices=("chat","compare","training","configs","docs","settings","runtimes"),default="chat")
     args=parser.parse_args()
     app=QApplication.instance() or QApplication([]); app.setApplicationName(APP_NAME); app.setStyle("Fusion"); app.setStyleSheet(STYLE)
     lock=None
@@ -1241,7 +1243,7 @@ def main():
     # Layout captures never overwrite live conversation history or preferences.
     capture_state=tempfile.TemporaryDirectory(prefix="trance-layout-") if args.screenshot else None
     window=MainWindow(state_dir=Path(capture_state.name) if capture_state else None)
-    window.show(); window._show_page(("chat","compare","training","configs","docs","settings").index(args.page))
+    window.show(); window._show_page(("chat","compare","training","configs","docs","settings","runtimes").index(args.page))
     if args.screenshot:
         def capture():
             args.screenshot.parent.mkdir(parents=True,exist_ok=True)
